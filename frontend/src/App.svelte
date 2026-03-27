@@ -13,6 +13,8 @@
   let selectedAppID: string | null = null;
   let timeline: ipcapi.SnapshotMeta[] = [];
   let selectedSnapshotID: string | null = null;
+  let timelineLimit = 20;
+  let showOnlyImportant = true;
 
   let overlaySnapshots: ipcapi.SnapshotMeta[] = [];
   let overlayIndex = 0;
@@ -54,9 +56,22 @@
   async function refreshTimeline(appID: string) {
     try {
       timeline = await GetTimeline(appID);
+      timelineLimit = 20;
       selectedSnapshotID = timeline[0]?.snapshotID ?? null;
     } catch (e: any) {
       pushToast('error', `GetTimeline failed: ${e?.message ?? e}`);
+    }
+  }
+
+  const isImportantSnapshot = (s: ipcapi.SnapshotMeta) =>
+    s.windowsCount > 0 || s.filesAdded > 0 || s.filesRemoved > 0;
+
+  $: filteredTimeline = showOnlyImportant ? timeline.filter(isImportantSnapshot) : timeline;
+  $: visibleTimeline = filteredTimeline.slice(0, timelineLimit);
+  $: if (selectedAppID) {
+    const ids = new Set(visibleTimeline.map(s => s.snapshotID));
+    if (!selectedSnapshotID || !ids.has(selectedSnapshotID)) {
+      selectedSnapshotID = visibleTimeline[0]?.snapshotID ?? null;
     }
   }
 
@@ -307,8 +322,17 @@
             {:else if timeline.length === 0}
               <div class="empty">No snapshots for this app yet</div>
             {:else}
+              <div class="timelineControls">
+                <label class="toggle">
+                  <input type="checkbox" bind:checked={showOnlyImportant} />
+                  <span>Only important changes</span>
+                </label>
+                <div class="count">
+                  Showing {Math.min(visibleTimeline.length, filteredTimeline.length)} of {filteredTimeline.length}
+                </div>
+              </div>
               <div class="snapList" role="list">
-                {#each timeline as s (s.snapshotID)}
+                {#each visibleTimeline as s (s.snapshotID)}
                   <button
                     class="snap {selectedSnapshotID === s.snapshotID ? 'active' : ''}"
                     on:click={() => (selectedSnapshotID = s.snapshotID)}
@@ -321,6 +345,9 @@
                   </button>
                 {/each}
               </div>
+              {#if filteredTimeline.length > visibleTimeline.length}
+                <button class="btn ghost showMore" on:click={() => (timelineLimit += 20)}>Show more</button>
+              {/if}
               <div class="bottomBar">
                 <button class="btn ghost" on:click={() => selectedAppID && openOverlay(selectedAppID)}>Quick overlay</button>
                 <button
@@ -474,6 +501,26 @@
     padding: 12px;
   }
 
+  .timelineControls {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    margin-bottom: 8px;
+    font-size: 12px;
+    opacity: 0.8;
+  }
+  .toggle {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    cursor: pointer;
+  }
+  .toggle input {
+    accent-color: #6366f1;
+  }
+  .count { white-space: nowrap; }
+
   .snapList {
     flex: 1;
     min-height: 0;
@@ -481,6 +528,10 @@
     display: flex;
     flex-direction: column;
     gap: 8px;
+  }
+  .showMore {
+    align-self: center;
+    margin: 10px 0 2px;
   }
   .snap {
     text-align: left;
@@ -591,8 +642,8 @@
 
   .toasts {
     position: fixed;
-    top: 14px;
-    right: 14px;
+    bottom: 14px;
+    left: 14px;
     display: flex;
     flex-direction: column;
     gap: 6px;

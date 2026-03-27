@@ -16,6 +16,7 @@ type Registry struct {
 func DefaultRegistry() *Registry {
 	return &Registry{
 		list: []AppPlugin{
+			NewExplorerPlugin(),
 			NewVSCodePlugin(),
 			NewChromePlugin(),
 			NewOfficePlugin(),
