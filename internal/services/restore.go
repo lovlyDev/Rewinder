@@ -26,15 +26,16 @@ func (s *Services) Restore(appID string, snapshotID string) error {
 	}
 	fail := func(err error) error {
 		log.Printf("rewinder: restore %s/%s failed: %v", appID, snapshotID, err)
-		s.emit("onRestoreError", ipcapi.RestoreErrorEvent{AppID: appID, SnapshotID: snapshotID, Error: "restore.failed", Code: "restore.failed"})
-		return err
+		code, params := ipcapi.ErrorCode(err)
+		s.emit("onRestoreError", ipcapi.RestoreErrorEvent{AppID: appID, SnapshotID: snapshotID, Error: code, Code: code, Params: params})
+		return errors.New(code)
 	}
 	log.Printf("rewinder: restore requested %s/%s", appID, snapshotID)
 
 	progress("resolve", 5, "Resolving snapshot")
 	snap, full, err := s.ss.ResolveSnapshot(appID, snapshotID)
 	if err != nil {
-		return fail(err)
+		return fail(&ipcapi.Fault{Code: "restore.snapshot", Cause: err})
 	}
 	res, err := s.rs.RestoreSnapshot(progress, snap, full)
 	if err != nil {

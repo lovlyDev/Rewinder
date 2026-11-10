@@ -14,10 +14,7 @@ import (
 )
 
 const (
-	modAlt      = 0x0001
-	modControl  = 0x0002
 	modNoRepeat = 0x4000
-	vkZ         = 0x5A
 	wmHotkey    = 0x0312
 	wmQuit      = 0x0012
 	wmRebind    = 0x8001
@@ -43,7 +40,7 @@ type msg struct {
 	PtY     int32
 }
 
-// ErrTaken is reported when another program already owns Ctrl+Alt+Z.
+// ErrTaken is reported when another program already owns the combination.
 var ErrTaken = errors.New("hotkey.taken")
 
 // Listener calls OnPress each time the hotkey is pressed.
@@ -75,8 +72,11 @@ func (l *Listener) Stop() {
 		return
 	}
 	l.stopOnce.Do(func() {
+		l.mu.Lock()
+		defer l.mu.Unlock()
 		<-l.ready
 		_, _, _ = procPostThreadMessageW.Call(uintptr(l.thread), wmQuit, 0, 0)
+		<-l.done
 	})
 }
 

@@ -4,7 +4,7 @@
  import { loadApps, loadTimeline } from '../../lib/apps';
  import { restore } from '../../lib/restore';
  import { when } from '../../lib/format';
- import { t } from '../../i18n';
+ import { t, language } from '../../i18n';
  import type { SnapshotMeta } from '../../lib/types';
  import Icon from '../../ui/icon/Icon.svelte';
  import IconButton from '../../ui/button/IconButton.svelte';
@@ -26,7 +26,6 @@
  }
  function step(d: number) { index=Math.max(0,Math.min(snapshots.length-1,index+d)); }
  function keyboard(e: KeyboardEvent) {
-  if(e.key==='Enter' && e.target instanceof HTMLButtonElement)return;
   const actions: Record<string,()=>void>={Escape:()=>void close(),Enter:()=>void restoreCurrent(),ArrowLeft:()=>step(-1),ArrowRight:()=>step(1)};
   if(!actions[e.key])return;e.preventDefault();void LogUI(`overlay key ${e.key}`);actions[e.key]();
  }
@@ -39,7 +38,7 @@
   <div class="scale-row"><IconButton name="arrow-left" label={$t('timeline')} disabled={index===0} on:click={() => step(-1)} />
    <div class="scale"><div class="marks" /><div class="marker-track"><span class="marker" style="transform:translateX({snapshots.length>1?index/(snapshots.length-1)*100:0}%)"><i /></span></div><input type="range" min="0" max={snapshots.length-1} bind:value={index} aria-label={$t('timeline')} /></div>
    <IconButton name="arrow-right" label={$t('timeline')} disabled={index===snapshots.length-1} on:click={() => step(1)} /></div>
-  <div class="preview"><time>{when(current.timestampUTC)}</time><span>{$t('windows',{n:current.windowsCount})}</span>{#if index===0}<small>{$t('current')}</small>{/if}</div>
+  <div class="preview"><time>{when(current.timestampUTC,$language)}</time><span>{$t('windows',{n:current.windowsCount})}</span>{#if index===0}<small>{$t('current')}</small>{/if}</div>
  {:else}<div class="empty"><Icon name="clock-counter-clockwise" />{$t('noSnapshots')}</div>{/if}
  <footer><span>{$t('overlayHint')}</span><Button primary icon="arrow-counter-clockwise" disabled={!current||busy} on:click={restoreCurrent}>{$t('restore')}</Button></footer>
 </section>

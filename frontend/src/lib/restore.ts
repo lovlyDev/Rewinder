@@ -1,10 +1,16 @@
 import { get, writable } from 'svelte/store';
 import { Restore } from '../../wailsjs/go/main/App';
-import { t } from '../i18n';
-import { pushToast, toastError } from './toasts';
+import { errorKey } from '../i18n';
+import { pushMessage, toastError } from './toasts';
 export const restoring = writable(false);
+const reported = new Set<string>();
+export function onRestoreError(p: {snapshotID:string;code:string;params?:Record<string,unknown>}) {
+ reported.add(p.snapshotID);
+ if(reported.size>20)reported.delete(reported.values().next().value as string);
+ pushMessage('error',errorKey(p.code),p.params);
+}
 export async function restore(appID: string,snapshotID: string) {
  if(get(restoring))return;
- restoring.set(true);pushToast('info',get(t)('restoring'));
- try {await Restore(appID,snapshotID);}catch(e){toastError('restore.failed',e);}finally{restoring.set(false);}
+ restoring.set(true);pushMessage('info','restoring');
+ try {await Restore(appID,snapshotID);}catch(e){if(!reported.has(snapshotID))toastError('restore.failed',e);}finally{reported.delete(snapshotID);restoring.set(false);}
 }

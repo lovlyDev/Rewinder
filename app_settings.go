@@ -30,6 +30,9 @@ func (a *App) SaveSettings(s settings.Settings) error {
 	}
 	a.settingsMu.Lock()
 	defer a.settingsMu.Unlock()
+	return a.saveSettingsLocked(s)
+}
+func (a *App) saveSettingsLocked(s settings.Settings) error {
 	old := a.preferences
 	if a.svc == nil {
 		return errNotReady
@@ -56,9 +59,15 @@ func (a *App) SaveSettings(s settings.Settings) error {
 	return nil
 }
 func (a *App) SetHotkey(mods, key uint32) error {
-	s := a.GetSettings()
+	combo := hotkey.Combination{Mods: mods, Key: key}
+	if err := combo.Validate(); err != nil {
+		return err
+	}
+	a.settingsMu.Lock()
+	defer a.settingsMu.Unlock()
+	s := a.preferences
 	s.Hotkey = hotkey.Combination{Mods: mods, Key: key}
-	return a.SaveSettings(s)
+	return a.saveSettingsLocked(s)
 }
 
 type AppInfo struct {

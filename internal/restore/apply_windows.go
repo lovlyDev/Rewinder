@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"sort"
 
+	"Rewinder/internal/ipcapi"
 	"Rewinder/internal/state"
 	"Rewinder/internal/winapi"
 )
@@ -48,9 +49,9 @@ func (e *Engine) apply(saved *state.AppState, live *state.AppState) (int, error)
 func refusedError(saved *state.AppState, hwnd uintptr, err error) error {
 	name := filepath.Base(saved.ExecutablePath)
 	if winapi.IsElevated(winapi.WindowPID(hwnd)) {
-		return fmt.Errorf("%s runs as administrator, so Windows does not let Rewinder move its windows; run Rewinder as administrator to restore it", name)
+		return &ipcapi.Fault{Code: "restore.elevated", Params: map[string]any{"app": name}, Cause: fmt.Errorf("%s is elevated: %w", name, err)}
 	}
-	return fmt.Errorf("Windows refused to move the windows of %s: %v", name, err)
+	return &ipcapi.Fault{Code: "restore.refused", Params: map[string]any{"app": name}, Cause: err}
 }
 
 // raiseAndFocus restores Z-order and gives focus to the window that had it.

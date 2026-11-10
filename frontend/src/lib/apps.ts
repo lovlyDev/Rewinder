@@ -11,6 +11,7 @@ let revision = 0;
 let appCache: AppSummary[] = [];
 let timelineCache: SnapshotMeta[] = [];
 let refreshPromise: Promise<void> | undefined;
+const summaryRevisions = new Map<string, number>();
 const merge = (a: SnapshotMeta[], b: SnapshotMeta[]) => Array.from(new Map([...a,...b].map(s => [s.snapshotID,s])).values()).sort((a,b) => b.timestampUTC-a.timestampUTC).slice(0,500);
 function publish() { if(get(visible)) {apps.set(appCache);timeline.set(timelineCache);} }
 export async function loadApps(): Promise<AppSummary[]> {
@@ -32,19 +33,22 @@ export function refresh(): Promise<void> {
   const id=current && list.some(a=>a.appID===current) ? current : list[0]?.appID;
   if(id && get(visible)) {
    if(id!==current) await selectApp(id);
-   else {const list=await loadTimeline(id);if(get(selectedAppID)===id){timelineCache=merge(list,timelineCache);publish();}}
+   else {const previous=new Set(timelineCache.map(s=>s.snapshotID));const list=await loadTimeline(id);if(get(selectedAppID)===id){timelineCache=merge(list,timelineCache.filter(s=>!previous.has(s.snapshotID)));publish();}}
   }
  })().finally(()=>refreshPromise=undefined);
  return refreshPromise;
 }
 async function applySnapshots(appID: string, snapshots: SnapshotMeta[]) {
  revision++;
+ const requestRevision=(summaryRevisions.get(appID)??0)+1;
+ summaryRevisions.set(appID,requestRevision);
  if(get(selectedAppID)===appID) timelineCache=merge(timelineCache,snapshots);
  const latest=snapshots[0];
  appCache=appCache.map(a=>a.appID===appID ? {...a,lastActivityUTC:Math.max(a.lastActivityUTC,latest.timestampUTC)} as AppSummary : a).sort((a,b)=>b.lastActivityUTC-a.lastActivityUTC);
  publish();
  try {
   const summary=await GetAppSummary(appID);
+  if(summaryRevisions.get(appID)!==requestRevision)return;
   if(summary){appCache=[summary,...appCache.filter(a=>a.appID!==appID)].sort((a,b)=>b.lastActivityUTC-a.lastActivityUTC);publish();if(!get(selectedAppID)&&get(visible))await selectApp(appID);}
  } catch(e){toastError('loadFailed',e);}
 }

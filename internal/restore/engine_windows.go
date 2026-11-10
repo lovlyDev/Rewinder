@@ -5,10 +5,10 @@
 package restore
 
 import (
-	"errors"
 	"fmt"
 	"time"
 
+	"Rewinder/internal/ipcapi"
 	"Rewinder/internal/plugins"
 	"Rewinder/internal/snapshot"
 	"Rewinder/internal/state"
@@ -46,12 +46,12 @@ type Result struct {
 func (e *Engine) RestoreSnapshot(progress ProgressFn, _ *snapshot.Snapshot, full *snapshot.FullSnapshot) (Result, error) {
 	var res Result
 	if full == nil {
-		return res, errors.New("no snapshot state")
+		return res, &ipcapi.Fault{Code: "restore.snapshot"}
 	}
 	saved := full.App.Clone()
 	res.Saved = len(saved.Windows)
 	if saved.ExecutablePath == "" {
-		return res, errors.New("snapshot has no executable path")
+		return res, &ipcapi.Fault{Code: "restore.snapshot"}
 	}
 
 	progress("find_instance", 10, "Looking for running instance")
@@ -60,13 +60,13 @@ func (e *Engine) RestoreSnapshot(progress ProgressFn, _ *snapshot.Snapshot, full
 	if len(live.Windows) == 0 {
 		progress("relaunch", 25, "Starting "+saved.ExecutablePath)
 		if err := e.relaunch(&saved); err != nil {
-			return res, fmt.Errorf("could not start the app: %w", err)
+			return res, &ipcapi.Fault{Code: "restore.launch", Cause: err}
 		}
 		res.Relaunched = true
 		progress("wait_windows", 40, "Waiting for windows")
 		live = e.waitForWindows(&saved, e.LaunchTimeout)
 		if len(live.Windows) == 0 {
-			return res, errors.New("the app started but no window appeared")
+			return res, &ipcapi.Fault{Code: "restore.noWindows"}
 		}
 	} else if n := e.plugins.Reopen(&saved, live); n > 0 {
 		res.Reopened = n
@@ -84,7 +84,7 @@ func (e *Engine) RestoreSnapshot(progress ProgressFn, _ *snapshot.Snapshot, full
 		return res, err
 	}
 	if moved == 0 {
-		return res, errors.New("none of the saved windows could be found")
+		return res, &ipcapi.Fault{Code: "restore.noMatch"}
 	}
 	res.Matched = moved
 	if res.Relaunched || res.Reopened > 0 {

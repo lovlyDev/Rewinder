@@ -48,7 +48,7 @@ func (a *App) startup(ctx context.Context) {
 	a.start.Do(func() {
 		a.svc = services.New(services.Dependencies{
 			Hotkey:   a.preferences.Hotkey,
-			Language: a.GetAppInfo().SystemLanguage,
+			Language: a.preferenceLanguage(),
 			EmitEvent: func(name string, data any) {
 				runtime.EventsEmit(ctx, name, data)
 				if name == "onExitRequested" {
@@ -169,22 +169,34 @@ func (a *App) SetAutostart(enabled bool) error {
 	return services.SetAutostart(enabled)
 }
 
+// Wails 2.11 SetPos takes a work-area-relative offset, while Pos is absolute.
+// Keep all saved coordinates absolute and convert at this one boundary.
+func (a *App) setAbsolutePosition(x, y int) {
+	work := winapi.MonitorWork(winapi.OwnWindow())
+	runtime.WindowSetPosition(a.ctx, x-int(work.Left), y-int(work.Top))
+}
 func (a *App) prepareOverlay() {
 	a.windowMu.Lock()
 	defer a.windowMu.Unlock()
+	runtime.WindowUnminimise(a.ctx)
 	if !a.overlay {
+		a.previous.maximized = runtime.WindowIsMaximised(a.ctx)
+		runtime.WindowUnmaximise(a.ctx)
 		a.previous.w, a.previous.h = runtime.WindowGetSize(a.ctx)
 		a.previous.x, a.previous.y = runtime.WindowGetPosition(a.ctx)
-		a.previous.maximized = runtime.WindowIsMaximised(a.ctx)
 		a.overlay = true
-	}
-	runtime.WindowUnminimise(a.ctx)
-	runtime.WindowUnmaximise(a.ctx)
-	runtime.WindowSetMinSize(a.ctx, 0, 0)
-	runtime.WindowSetSize(a.ctx, 760, 240)
-	if work, ok := winapi.CursorMonitorWork(); ok {
-		runtime.WindowSetPosition(a.ctx, int(work.Left)+int(work.Right-work.Left)/2-380, int(work.Top)+int(work.Bottom-work.Top)/2-120)
 	} else {
+		runtime.WindowUnmaximise(a.ctx)
+	}
+	runtime.WindowSetMinSize(a.ctx, 0, 0)
+	if work, ok := winapi.CursorMonitorWork(); ok {
+		// Move to the target monitor first, so SetSize uses that monitor's DPI.
+		a.setAbsolutePosition(int(work.Left)+int(work.Right-work.Left)/2-380, int(work.Top)+int(work.Bottom-work.Top)/2-120)
+		runtime.WindowSetSize(a.ctx, 760, 240)
+		rect := winapi.WindowRect(winapi.OwnWindow())
+		a.setAbsolutePosition(int(work.Left)+int(work.Right-work.Left-rect.Right+rect.Left)/2, int(work.Top)+int(work.Bottom-work.Top-rect.Bottom+rect.Top)/2)
+	} else {
+		runtime.WindowSetSize(a.ctx, 760, 240)
 		runtime.WindowCenter(a.ctx)
 	}
 	runtime.WindowSetAlwaysOnTop(a.ctx, true)
@@ -196,13 +208,20 @@ func (a *App) restoreGeometry() {
 	if !a.overlay {
 		return
 	}
+	a.setAbsolutePosition(a.previous.x, a.previous.y)
 	runtime.WindowSetSize(a.ctx, a.previous.w, a.previous.h)
-	runtime.WindowSetPosition(a.ctx, a.previous.x, a.previous.y)
 	runtime.WindowSetMinSize(a.ctx, 760, 500)
 	if a.previous.maximized {
 		runtime.WindowMaximise(a.ctx)
 	}
 	a.overlay = false
+}
+func (a *App) preferenceLanguage() string {
+	lang := a.preferences.Language
+	if lang == "system" {
+		return winapi.SystemLanguage()
+	}
+	return lang
 }
 func (a *App) MinimiseWindow() {
 	runtime.EventsEmit(a.ctx, "onWindowVisibilityChanged", false)
@@ -211,6 +230,10 @@ func (a *App) MinimiseWindow() {
 func (a *App) HideWindow() {
 	runtime.EventsEmit(a.ctx, "onWindowVisibilityChanged", false)
 	runtime.WindowHide(a.ctx)
+}
+
+func (a *App) GetWindowVisible() bool {
+	return winapi.OwnWindowVisible() && !runtime.WindowIsMinimised(a.ctx)
 }
 
 func (a *App) GetAppSummary(appID string) (*ipcapi.AppSummary, error) {

@@ -29,8 +29,11 @@ const ru: Record<keyof typeof en, string> = {
  'background.read': 'Не удалось открыть картинку.', 'background.size': 'Выберите картинку до 20 МБ и 24 мегапикселей.',
  'restore.busy': 'Другое восстановление ещё выполняется.', 'restore.failed': 'Не удалось восстановить окна. Подробности в журнале.',
  'restore.done': 'Восстановлено окон: {matched} из {saved}.', 'restore.relaunched': 'Приложение запущено заново.',
+ 'restore.doneRelaunched': 'Восстановлено окон: {matched} из {saved}. Приложение запущено заново.',
  'restore.snapshot': 'Этот снимок больше недоступен.', 'restore.launch': 'Не удалось запустить приложение.',
  'restore.noWindows': 'Приложение не открыло окно.', 'restore.noMatch': 'Сохранённые окна не найдены.',
+ 'restore.elevated': '{app} запущено от администратора. Windows заблокировала восстановление окон.',
+ 'restore.refused': 'Windows отказала в перемещении окон {app}.',
  loadFailed: 'Не удалось загрузить историю.', saveFailed: 'Не удалось применить изменение.', unknownError: 'Произошла ошибка. Подробности в журнале.',
 };
 export default ru;

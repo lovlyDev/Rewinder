@@ -5,7 +5,7 @@
  import { reveal } from '../../lib/motion';
 </script>
 <div class="toasts" aria-live="polite">
- {#each $toasts as toast (toast.id)}<div class="toast {toast.kind}" transition:reveal><span>{toast.text}</span><IconButton name="x" label={$t('close')} on:click={() => dismiss(toast.id)} /></div>{/each}
+ {#each $toasts as toast (toast.id)}<div class="toast {toast.kind}" transition:reveal><span>{toast.code?$t(toast.code,toast.params):toast.text}</span><IconButton name="x" label={$t('close')} on:click={() => dismiss(toast.id)} /></div>{/each}
 </div>
 <style>
  .toasts { position: fixed; right: 18px; bottom: 16px; z-index: 300; display: grid; gap: 8px; pointer-events: none; }

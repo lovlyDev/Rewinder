@@ -1,7 +1,6 @@
 <script lang="ts">
  import { createEventDispatcher } from 'svelte';
- import { SetHotkey, GetSettings } from '../../../../wailsjs/go/main/App';
- import { preferences } from '../../../lib/preferences';
+ import { saveHotkey } from '../../../lib/preferences';
  import { t, message } from '../../../i18n';
  import HotkeyInput from '../../../ui/input/HotkeyInput.svelte';
  import type { settings } from '../../../../wailsjs/go/models';
@@ -11,7 +10,7 @@
  let error='';let busy=false;
  async function record(e: CustomEvent<{mods:number;key:number}>) {
   error='';busy=true;
-  try{await SetHotkey(e.detail.mods,e.detail.key);preferences.set(await GetSettings());dispatch('updated');}
+  try{await saveHotkey(e.detail.mods,e.detail.key);dispatch('updated');}
   catch(e){error=message(e);}finally{busy=false;}
  }
 </script>

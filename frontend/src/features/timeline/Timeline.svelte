@@ -5,7 +5,7 @@
  import { appPaused } from '../../lib/ui';
  import { restore, restoring } from '../../lib/restore';
  import { when } from '../../lib/format';
- import { t } from '../../i18n';
+ import { t, language } from '../../i18n';
  import Button from '../../ui/button/Button.svelte';
  import IconButton from '../../ui/button/IconButton.svelte';
  import Icon from '../../ui/icon/Icon.svelte';
@@ -30,7 +30,7 @@
      <button class="snapshot" aria-pressed={selected===snapshot.snapshotID} on:click={() => selected=snapshot.snapshotID} in:reveal>
       <span class="time-icon"><Icon name="clock-counter-clockwise" filled={selected===snapshot.snapshotID} size={22} /></span>
       <span class="details"><strong>{$t('windows',{n:snapshot.windowsCount})}</strong><small>{$t('files',{added:snapshot.filesAdded,removed:snapshot.filesRemoved})}</small></span>
-      <span class="time"><time>{when(snapshot.timestampUTC)}</time>{#if i===0}<small>{$t('current')}</small>{/if}</span>
+      <span class="time"><time>{when(snapshot.timestampUTC,$language)}</time>{#if i===0}<small>{$t('current')}</small>{/if}</span>
      </button>
     {:else}<div class="empty"><Icon name="clock-counter-clockwise" size={36} /><p>{$t(app?'noSnapshots':'selectApp')}</p></div>{/each}
    </div>

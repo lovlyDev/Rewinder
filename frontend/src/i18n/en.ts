@@ -28,7 +28,10 @@ export default {
  'background.read': 'Could not open this image.', 'background.size': 'Choose an image under 20 MB and 24 megapixels.',
  'restore.busy': 'Another restore is in progress.', 'restore.failed': 'Could not restore these windows. Details are in the log.',
  'restore.done': 'Restored {matched} of {saved} windows.', 'restore.relaunched': 'Application relaunched.',
+ 'restore.doneRelaunched': 'Restored {matched} of {saved} windows. Application relaunched.',
  'restore.snapshot': 'This snapshot is no longer available.', 'restore.launch': 'Could not start the application.',
  'restore.noWindows': 'The application did not open a window.', 'restore.noMatch': 'No saved windows could be found.',
+ 'restore.elevated': '{app} runs as administrator. Windows blocked restoring its windows.',
+ 'restore.refused': 'Windows refused to move the windows of {app}.',
  loadFailed: 'Could not load history.', saveFailed: 'Could not apply this change.', unknownError: 'Something went wrong. Details are in the log.',
 } as const;
