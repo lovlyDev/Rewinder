@@ -28,17 +28,21 @@ type SnapshotCreatedEvent struct {
 }
 
 type RestoreProgressEvent struct {
-	AppID      string `json:"appID"`
-	SnapshotID string `json:"snapshotID"`
-	Stage      string `json:"stage"`
-	Percent    int    `json:"percent"`
-	Message    string `json:"message"`
+	AppID      string         `json:"appID"`
+	SnapshotID string         `json:"snapshotID"`
+	Stage      string         `json:"stage"`
+	Percent    int            `json:"percent"`
+	Message    string         `json:"message"`
+	Code       string         `json:"code"`
+	Params     map[string]any `json:"params,omitempty"`
 }
 
 type RestoreErrorEvent struct {
-	AppID      string `json:"appID"`
-	SnapshotID string `json:"snapshotID"`
-	Error      string `json:"error"`
+	AppID      string         `json:"appID"`
+	SnapshotID string         `json:"snapshotID"`
+	Error      string         `json:"error"`
+	Code       string         `json:"code"`
+	Params     map[string]any `json:"params,omitempty"`
 }
 
 type TrackingStateChangedEvent struct {

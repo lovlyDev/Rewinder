@@ -22,6 +22,9 @@ func main() {
 
 	err := wails.Run(&options.App{
 		Title:             "Rewinder",
+		Frameless:         true,
+		MinWidth:          760,
+		MinHeight:         500,
 		Width:             1024,
 		Height:            768,
 		StartHidden:       services.StartedByAutostart(os.Args[1:]),
@@ -29,16 +32,17 @@ func main() {
 		AssetServer: &assetserver.Options{
 			Assets: assets,
 		},
-		BackgroundColour: &options.RGBA{R: 27, G: 38, B: 54, A: 1},
+		BackgroundColour: &options.RGBA{R: 10, G: 10, B: 12, A: 255},
 		Windows: &windows.Options{
 			// The UI is a few static panels; software rendering is plenty and
 			// saves WebView2's whole GPU process.
 			WebviewGpuIsDisabled: true,
 		},
-		OnStartup:        app.startup,
-		OnShutdown:       app.shutdown,
+		OnStartup:  app.startup,
+		OnShutdown: app.shutdown,
 		OnBeforeClose: func(ctx context.Context) (prevent bool) {
-			return false
+			app.HideWindow()
+			return true
 		},
 		SingleInstanceLock: &options.SingleInstanceLock{
 			UniqueId: "rewinder-7c1f3f2e-app-time-machine",

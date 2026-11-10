@@ -35,6 +35,10 @@ func icon() []byte {
 
 // Menu holds the actions behind the tray menu items. Nil actions are ignored.
 type Menu struct {
+	Hotkey           string
+	Language         string
+	mu               sync.Mutex
+	items            []*systray.MenuItem
 	OnOpenTimeline   func()
 	OnPauseTracking  func()
 	OnResumeTracking func()
@@ -70,7 +74,6 @@ func (m *Menu) Stop() {
 func (m *Menu) onReady() {
 	systray.SetIcon(icon())
 	systray.SetTitle("Rewinder")
-	systray.SetTooltip("Rewinder: Ctrl+Alt+Z to restore")
 
 	open := systray.AddMenuItem("Open Timeline", "Open timeline window")
 	pause := systray.AddMenuItem("Pause Tracking", "Pause tracking")
@@ -79,6 +82,10 @@ func (m *Menu) onReady() {
 	systray.AddSeparator()
 	exit := systray.AddMenuItem("Exit", "Exit")
 
+	m.mu.Lock()
+	m.items = []*systray.MenuItem{open, pause, resume, settings, exit}
+	m.updateLocked()
+	m.mu.Unlock()
 	go func() {
 		for {
 			select {
@@ -103,5 +110,26 @@ func (m *Menu) onReady() {
 func call(f func()) {
 	if f != nil {
 		f()
+	}
+}
+
+func (m *Menu) Update(hotkey, language string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.Hotkey = hotkey
+	m.Language = language
+	if len(m.items) > 0 {
+		m.updateLocked()
+	}
+}
+func (m *Menu) updateLocked() {
+	systray.SetTooltip("Rewinder: " + m.Hotkey)
+	labels := []string{"Open Rewinder", "Pause tracking", "Resume tracking", "Settings", "Exit"}
+	if m.Language == "ru" {
+		labels = []string{"Открыть Rewinder", "Приостановить отслеживание", "Продолжить отслеживание", "Настройки", "Выход"}
+	}
+	for i, item := range m.items {
+		item.SetTitle(labels[i])
+		item.SetTooltip(labels[i])
 	}
 }

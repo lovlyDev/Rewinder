@@ -10,19 +10,32 @@ import (
 
 	"Rewinder/internal/ipcapi"
 	"Rewinder/internal/services"
+	"Rewinder/internal/settings"
 	"Rewinder/internal/winapi"
 
 	"github.com/wailsapp/wails/v2/pkg/runtime"
 )
 
 type App struct {
-	ctx   context.Context
-	svc   *services.Services
-	start sync.Once
+	ctx         context.Context
+	svc         *services.Services
+	start       sync.Once
+	settingsMu  sync.Mutex
+	preferences settings.Settings
+	windowMu    sync.Mutex
+	overlay     bool
+	previous    struct {
+		w, h, x, y int
+		maximized  bool
+	}
 }
 
 func NewApp() *App {
-	return &App{}
+	s, err := settings.Load(settings.Directory())
+	if err != nil {
+		log.Printf("settings: %v", err)
+	}
+	return &App{preferences: s}
 }
 
 // OverlayRequest tells the frontend which app the user was in when they pressed the hotkey.
@@ -34,6 +47,8 @@ func (a *App) startup(ctx context.Context) {
 	a.ctx = ctx
 	a.start.Do(func() {
 		a.svc = services.New(services.Dependencies{
+			Hotkey:   a.preferences.Hotkey,
+			Language: a.GetAppInfo().SystemLanguage,
 			EmitEvent: func(name string, data any) {
 				runtime.EventsEmit(ctx, name, data)
 				if name == "onExitRequested" {
@@ -44,8 +59,8 @@ func (a *App) startup(ctx context.Context) {
 				// Show last: Wails' show path is what moves keyboard focus into the
 				// WebView, and changing window styles afterwards can lose it again.
 				runtime.EventsEmit(ctx, "onOverlayOpenRequested", OverlayRequest{AppID: appID})
-				runtime.WindowSetAlwaysOnTop(ctx, true)
-				runtime.WindowFullscreen(ctx)
+				a.prepareOverlay()
+				runtime.EventsEmit(ctx, "onWindowVisibilityChanged", true)
 				runtime.WindowShow(ctx)
 				// Windows often refuses Wails' own SetForegroundWindow (focus-stealing
 				// guard); then the overlay is visible but keys still go to the other app.
@@ -74,7 +89,7 @@ func (a *App) onSecondInstance() {
 	a.ShowTimelineWindow()
 }
 
-var errNotReady = errors.New("backend not ready")
+var errNotReady = errors.New("backend.unavailable")
 
 func (a *App) GetApps() ([]ipcapi.AppSummary, error) {
 	if a.svc == nil {
@@ -117,21 +132,21 @@ func (a *App) ShowTimelineWindow() {
 	if a.ctx == nil {
 		return
 	}
-	runtime.WindowUnfullscreen(a.ctx)
-	runtime.WindowSetAlwaysOnTop(a.ctx, false)
+	a.restoreGeometry()
+	runtime.EventsEmit(a.ctx, "onWindowVisibilityChanged", true)
 	runtime.WindowShow(a.ctx)
 	runtime.WindowUnminimise(a.ctx)
 	runtime.EventsEmit(a.ctx, "onShowTimelineRequested", nil)
 }
 
-// HideOverlay leaves fullscreen and hides the window.
+// HideOverlay restores the normal geometry before hiding the window.
 func (a *App) HideOverlay() {
 	if a.ctx == nil {
 		return
 	}
-	runtime.WindowSetAlwaysOnTop(a.ctx, false)
-	runtime.WindowUnfullscreen(a.ctx)
+	runtime.EventsEmit(a.ctx, "onWindowVisibilityChanged", false)
 	runtime.WindowHide(a.ctx)
+	a.restoreGeometry()
 }
 
 func (a *App) ExitApp() {
@@ -152,4 +167,60 @@ func (a *App) GetAutostart() bool {
 
 func (a *App) SetAutostart(enabled bool) error {
 	return services.SetAutostart(enabled)
+}
+
+func (a *App) prepareOverlay() {
+	a.windowMu.Lock()
+	defer a.windowMu.Unlock()
+	if !a.overlay {
+		a.previous.w, a.previous.h = runtime.WindowGetSize(a.ctx)
+		a.previous.x, a.previous.y = runtime.WindowGetPosition(a.ctx)
+		a.previous.maximized = runtime.WindowIsMaximised(a.ctx)
+		a.overlay = true
+	}
+	runtime.WindowUnminimise(a.ctx)
+	runtime.WindowUnmaximise(a.ctx)
+	runtime.WindowSetMinSize(a.ctx, 0, 0)
+	runtime.WindowSetSize(a.ctx, 760, 240)
+	if work, ok := winapi.CursorMonitorWork(); ok {
+		runtime.WindowSetPosition(a.ctx, int(work.Left)+int(work.Right-work.Left)/2-380, int(work.Top)+int(work.Bottom-work.Top)/2-120)
+	} else {
+		runtime.WindowCenter(a.ctx)
+	}
+	runtime.WindowSetAlwaysOnTop(a.ctx, true)
+}
+func (a *App) restoreGeometry() {
+	a.windowMu.Lock()
+	defer a.windowMu.Unlock()
+	runtime.WindowSetAlwaysOnTop(a.ctx, false)
+	if !a.overlay {
+		return
+	}
+	runtime.WindowSetSize(a.ctx, a.previous.w, a.previous.h)
+	runtime.WindowSetPosition(a.ctx, a.previous.x, a.previous.y)
+	runtime.WindowSetMinSize(a.ctx, 760, 500)
+	if a.previous.maximized {
+		runtime.WindowMaximise(a.ctx)
+	}
+	a.overlay = false
+}
+func (a *App) MinimiseWindow() {
+	runtime.EventsEmit(a.ctx, "onWindowVisibilityChanged", false)
+	runtime.WindowMinimise(a.ctx)
+}
+func (a *App) HideWindow() {
+	runtime.EventsEmit(a.ctx, "onWindowVisibilityChanged", false)
+	runtime.WindowHide(a.ctx)
+}
+
+func (a *App) GetAppSummary(appID string) (*ipcapi.AppSummary, error) {
+	if a.svc == nil {
+		return nil, errNotReady
+	}
+	for _, app := range a.svc.GetApps() {
+		if app.AppID == appID {
+			return &app, nil
+		}
+	}
+	return nil, nil
 }

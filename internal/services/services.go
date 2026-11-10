@@ -24,6 +24,8 @@ type Dependencies struct {
 	EmitEvent          func(name string, data any)
 	OnOverlayRequested func(appID string)
 	ShowTimelineWindow func()
+	Hotkey             hotkey.Combination
+	Language           string
 }
 
 type Services struct {
@@ -99,6 +101,8 @@ func (s *Services) showTimeline() {
 func (s *Services) Start(ctx context.Context) {
 	s.started = true
 	s.tray = &tray.Menu{
+		Hotkey:           s.deps.Hotkey.String(),
+		Language:         s.deps.Language,
 		OnOpenTimeline:   s.showTimeline,
 		OnPauseTracking:  func() { s.PauseTracking(nil) },
 		OnResumeTracking: func() { s.ResumeTracking(nil) },
@@ -109,6 +113,7 @@ func (s *Services) Start(ctx context.Context) {
 		OnExit: func() { s.emit("onExitRequested", nil) },
 	}
 	s.hotkey = &hotkey.Listener{
+		Initial: s.deps.Hotkey,
 		OnPress: s.onHotkey,
 		OnError: func(err error) {
 			log.Printf("rewinder: %v", err)
@@ -147,4 +152,9 @@ func (s *Services) onHotkey() {
 	if s.deps.OnOverlayRequested != nil {
 		s.deps.OnOverlayRequested(id)
 	}
+}
+
+func (s *Services) SetHotkey(c hotkey.Combination) error { return s.hotkey.Rebind(c) }
+func (s *Services) UpdatePreferences(c hotkey.Combination, language string) {
+	s.tray.Update(c.String(), language)
 }
