@@ -1,13 +1,15 @@
+// Package snapshot keeps a per-application timeline of captured states and
+// persists it to disk, so history survives a restart of Rewinder or of the PC.
+//
+// Each snapshot stores the full AppState. A window list is a few KB, so this costs
+// little and avoids the failure modes of delta chains (lost bases, stale PIDs).
 package snapshot
 
 import (
 	"bytes"
 	"compress/gzip"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -24,59 +26,45 @@ import (
 
 type EngineConfig struct {
 	MaxSnapshotsPerApp int
-	MaxRAMBytes        int64
-	MaxDiskBytes       int64
 	Retention          time.Duration
-	StorageDir         string
+	StorageDir         string // empty disables persistence
 }
 
 type Engine struct {
 	cfg EngineConfig
+	now func() time.Time
 
 	mu   sync.RWMutex
 	apps map[string]*appTimeline
 }
 
 type appTimeline struct {
-	appID string
-	exe   string
-	name  string
+	AppID        string     `json:"appID"`
+	Exe          string     `json:"exe"`
+	Name         string     `json:"name"`
+	LastActivity time.Time  `json:"lastActivity"`
+	Snapshots    []Snapshot `json:"snapshots"`
 
-	lastActivity time.Time
-
-	snapshots []Snapshot
-	ramBytes  int64
+	dirty bool
 }
 
 type Snapshot struct {
-	SnapshotID     string     `json:"snapshotID"`
-	AppID          string     `json:"appID"`
-	BaseSnapshotID *string    `json:"baseSnapshotID,omitempty"`
-	Delta          StateDelta `json:"delta"`
-	Timestamp      time.Time  `json:"timestamp"`
-
-	Spilled bool   `json:"spilled"`
-	DiskRef string `json:"diskRef,omitempty"`
+	SnapshotID string         `json:"snapshotID"`
+	AppID      string         `json:"appID"`
+	Timestamp  time.Time      `json:"timestamp"`
+	State      state.AppState `json:"state"`
 }
 
-type StateDelta struct {
-	WindowsChanged   bool            `json:"windowsChanged"`
-	WindowDiffs      []WindowDiff    `json:"windowDiffs,omitempty"`
-	FilesAdded       []state.FileRef `json:"filesAdded,omitempty"`
-	FilesRemoved     []state.FileRef `json:"filesRemoved,omitempty"`
-	ClipboardChanged bool            `json:"clipboardChanged"`
-	PluginChanged    bool            `json:"pluginChanged"`
-	PluginData       map[string]any  `json:"pluginData,omitempty"`
-}
-
-type WindowDiff struct {
-	HWND   uintptr            `json:"hwnd"`
-	Before *state.WindowState `json:"before,omitempty"`
-	After  *state.WindowState `json:"after,omitempty"`
-}
-
+// FullSnapshot is the resolved state handed to the restore engine.
 type FullSnapshot struct {
 	App state.AppState `json:"app"`
+}
+
+const fileFormatVersion = 2
+
+type timelineFile struct {
+	Version  int          `json:"version"`
+	Timeline *appTimeline `json:"timeline"`
 }
 
 func NewEngine(cfg EngineConfig) *Engine {
@@ -84,148 +72,114 @@ func NewEngine(cfg EngineConfig) *Engine {
 		cfg.MaxSnapshotsPerApp = 500
 	}
 	if cfg.Retention <= 0 {
-		cfg.Retention = 24 * time.Hour
+		cfg.Retention = 7 * 24 * time.Hour
 	}
-	_ = os.MkdirAll(cfg.StorageDir, 0o755)
-	return &Engine{cfg: cfg, apps: map[string]*appTimeline{}}
+	return &Engine{cfg: cfg, now: time.Now, apps: map[string]*appTimeline{}}
 }
 
-func (e *Engine) Close() error { return nil }
-
 func (e *Engine) GetApps() []ipcapi.AppSummary {
-	fmt.Printf("[DEBUG] GetApps called\n")
 	e.mu.RLock()
 	defer e.mu.RUnlock()
-	var out []ipcapi.AppSummary
+	out := make([]ipcapi.AppSummary, 0, len(e.apps))
 	for _, tl := range e.apps {
+		if len(tl.Snapshots) == 0 {
+			continue
+		}
 		out = append(out, ipcapi.AppSummary{
-			AppID:           tl.appID,
-			Name:            tl.name,
-			ExecutablePath:  tl.exe,
-			LastActivityUTC: tl.lastActivity.UTC().UnixMilli(),
-			SnapshotCount:   len(tl.snapshots),
+			AppID:           tl.AppID,
+			Name:            tl.Name,
+			ExecutablePath:  tl.Exe,
+			LastActivityUTC: tl.LastActivity.UTC().UnixMilli(),
+			SnapshotCount:   len(tl.Snapshots),
 			TrackingState:   "active",
 			RetentionStatus: "ok",
 		})
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].LastActivityUTC > out[j].LastActivityUTC })
-	fmt.Printf("[DEBUG] Returning %d apps\n", len(out))
 	return out
 }
 
+// GetTimeline returns snapshot metadata, newest first.
 func (e *Engine) GetTimeline(appID string) []ipcapi.SnapshotMeta {
 	e.mu.RLock()
 	defer e.mu.RUnlock()
 	tl := e.apps[appID]
 	if tl == nil {
-		return nil
+		return []ipcapi.SnapshotMeta{}
 	}
-	out := make([]ipcapi.SnapshotMeta, 0, len(tl.snapshots))
-	for _, s := range tl.snapshots {
-		out = append(out, ipcapi.SnapshotMeta{
-			SnapshotID:   s.SnapshotID,
-			AppID:        s.AppID,
-			Timestamp:    s.Timestamp.UTC().UnixMilli(),
-			WindowsCount: len(s.Delta.WindowDiffs),
-			FilesAdded:   len(s.Delta.FilesAdded),
-			FilesRemoved: len(s.Delta.FilesRemoved),
-		})
+	out := make([]ipcapi.SnapshotMeta, 0, len(tl.Snapshots))
+	for i := len(tl.Snapshots) - 1; i >= 0; i-- {
+		var prev *state.AppState
+		if i > 0 {
+			prev = &tl.Snapshots[i-1].State
+		}
+		out = append(out, meta(&tl.Snapshots[i], prev))
 	}
-	sort.Slice(out, func(i, j int) bool { return out[i].Timestamp > out[j].Timestamp })
 	return out
 }
 
+func meta(s *Snapshot, prev *state.AppState) ipcapi.SnapshotMeta {
+	m := ipcapi.SnapshotMeta{
+		SnapshotID:   s.SnapshotID,
+		AppID:        s.AppID,
+		Timestamp:    s.Timestamp.UTC().UnixMilli(),
+		WindowsCount: len(s.State.Windows),
+	}
+	if prev != nil {
+		added, removed := diffFiles(prev.OpenFiles, s.State.OpenFiles)
+		m.FilesAdded, m.FilesRemoved = len(added), len(removed)
+	} else {
+		m.FilesAdded = len(s.State.OpenFiles)
+	}
+	return m
+}
+
+// Ingest records a captured state. It returns nil metadata when the state does
+// not differ meaningfully from the latest snapshot of the same app.
 func (e *Engine) Ingest(app *state.AppState) (*ipcapi.SnapshotMeta, error) {
+	if app == nil || app.AppID == "" {
+		return nil, errors.New("empty app state")
+	}
+	if app.Timestamp.IsZero() {
+		app.Timestamp = e.now()
+	}
+	if app.Timestamp.Before(e.now().Add(-e.cfg.Retention)) {
+		return nil, nil // already past retention: it would be dropped right away
+	}
 	e.mu.Lock()
 	defer e.mu.Unlock()
 
 	tl := e.apps[app.AppID]
 	if tl == nil {
-		tl = &appTimeline{
-			appID: app.AppID,
-			exe:   app.ExecutablePath,
-			name:  filepath.Base(app.ExecutablePath),
-		}
+		tl = &appTimeline{AppID: app.AppID}
 		e.apps[app.AppID] = tl
 	}
-	tl.lastActivity = app.Timestamp
 	if app.ExecutablePath != "" {
-		tl.exe = app.ExecutablePath
-		tl.name = filepath.Base(app.ExecutablePath)
+		tl.Exe = app.ExecutablePath
+		tl.Name = filepath.Base(app.ExecutablePath)
 	}
+	tl.LastActivity = app.Timestamp
+	e.trimLocked(tl)
 
-	e.applyRetentionLocked(tl)
-
-	var base *FullSnapshot
-	if len(tl.snapshots) == 0 {
-		base = &FullSnapshot{App: *app}
-	} else {
-		// Оптимизируем получение базового снимка, только если действительно необходимо
-		_, full, err := e.resolveSnapshotLocked(tl, tl.snapshots[len(tl.snapshots)-1].SnapshotID)
-		if err == nil {
-			base = full
-		} else {
-			base = &FullSnapshot{App: *app}
+	var prev *state.AppState
+	if n := len(tl.Snapshots); n > 0 {
+		prev = &tl.Snapshots[n-1].State
+		if !Changed(prev, app) {
+			return nil, nil
 		}
-	}
-
-	delta := diffStates(&base.App, app)
-
-	// Пропускаем создание снапшота, если нет значительных изменений
-	if len(tl.snapshots) > 0 && !delta.WindowsChanged && !delta.ClipboardChanged && len(delta.FilesAdded) == 0 && len(delta.FilesRemoved) == 0 && !delta.PluginChanged {
-		return nil, nil
-	}
-
-	// Добавляем проверку, чтобы избежать создания слишком частых снапшотов
-	if len(tl.snapshots) > 0 {
-		lastSnapshot := tl.snapshots[len(tl.snapshots)-1]
-		if app.Timestamp.Sub(lastSnapshot.Timestamp) < 2*time.Second {
-			// Если прошло менее 2 секунд с последнего снапшота и изменения минимальны, пропускаем
-			if !delta.WindowsChanged && len(delta.FilesAdded) <= 1 && len(delta.FilesRemoved) <= 1 {
-				return nil, nil
-			}
-		}
-	}
-
-	sid := uuid.NewString()
-	var baseID *string
-	if len(tl.snapshots) > 0 {
-		b := tl.snapshots[len(tl.snapshots)-1].SnapshotID
-		baseID = &b
 	}
 
 	snap := Snapshot{
-		SnapshotID:     sid,
-		AppID:          app.AppID,
-		BaseSnapshotID: baseID,
-		Delta:          delta,
-		Timestamp:      app.Timestamp,
+		SnapshotID: uuid.NewString(),
+		AppID:      app.AppID,
+		Timestamp:  app.Timestamp,
+		State:      app.Clone(),
 	}
-
-	// Реже выполняем операции выгрузки на диск для экономии ресурсов
-	if len(tl.snapshots)%50 == 0 { // Увеличиваем интервал с 30 до 50
-		ref, err := e.spillFullSnapshotLocked(app.AppID, &FullSnapshot{App: *app})
-		if err == nil {
-			snap.Spilled = true
-			snap.DiskRef = ref
-			snap.BaseSnapshotID = nil
-		}
-	}
-
-	tl.snapshots = append(tl.snapshots, snap)
-
-	if len(tl.snapshots) > e.cfg.MaxSnapshotsPerApp {
-		tl.snapshots = tl.snapshots[len(tl.snapshots)-e.cfg.MaxSnapshotsPerApp:]
-	}
-
-	return &ipcapi.SnapshotMeta{
-		SnapshotID:   sid,
-		AppID:        app.AppID,
-		Timestamp:    app.Timestamp.UTC().UnixMilli(),
-		WindowsCount: len(app.Windows),
-		FilesAdded:   len(delta.FilesAdded),
-		FilesRemoved: len(delta.FilesRemoved),
-	}, nil
+	m := meta(&snap, prev) // before trimming, which may drop prev
+	tl.Snapshots = append(tl.Snapshots, snap)
+	tl.dirty = true
+	e.trimLocked(tl)
+	return &m, nil
 }
 
 func (e *Engine) ResolveSnapshot(appID, snapshotID string) (*Snapshot, *FullSnapshot, error) {
@@ -235,248 +189,223 @@ func (e *Engine) ResolveSnapshot(appID, snapshotID string) (*Snapshot, *FullSnap
 	if tl == nil {
 		return nil, nil, errors.New("unknown app")
 	}
-	s, full, err := e.resolveSnapshotLocked(tl, snapshotID)
-	return s, full, err
+	for i := range tl.Snapshots {
+		if tl.Snapshots[i].SnapshotID == snapshotID {
+			s := tl.Snapshots[i]
+			s.State = s.State.Clone()
+			return &s, &FullSnapshot{App: s.State.Clone()}, nil
+		}
+	}
+	return nil, nil, errors.New("snapshot not found")
 }
 
-func (e *Engine) resolveSnapshotLocked(tl *appTimeline, snapshotID string) (*Snapshot, *FullSnapshot, error) {
-	var idx = -1
-	for i := range tl.snapshots {
-		if tl.snapshots[i].SnapshotID == snapshotID {
-			idx = i
-			break
-		}
+func (e *Engine) trimLocked(tl *appTimeline) {
+	cut := e.now().Add(-e.cfg.Retention)
+	i := 0
+	for i < len(tl.Snapshots) && tl.Snapshots[i].Timestamp.Before(cut) {
+		i++
 	}
-	if idx == -1 {
-		return nil, nil, errors.New("snapshot not found")
+	if over := len(tl.Snapshots) - i - e.cfg.MaxSnapshotsPerApp; over > 0 {
+		i += over
 	}
-
-	var chain []Snapshot
-	for i := idx; i >= 0; i-- {
-		chain = append(chain, tl.snapshots[i])
-		if tl.snapshots[i].Spilled && tl.snapshots[i].DiskRef != "" && tl.snapshots[i].BaseSnapshotID == nil {
-			break
-		}
-		if tl.snapshots[i].BaseSnapshotID == nil && i == 0 {
-			break
-		}
+	if i > 0 {
+		tl.Snapshots = append([]Snapshot(nil), tl.Snapshots[i:]...)
+		tl.dirty = true
 	}
-
-	var base *FullSnapshot
-	last := chain[len(chain)-1]
-	if last.Spilled && last.DiskRef != "" && last.BaseSnapshotID == nil {
-		fs, err := e.loadFullSnapshotLocked(last.DiskRef)
-		if err != nil {
-			return nil, nil, err
-		}
-		base = fs
-	} else {
-		base = &FullSnapshot{App: state.AppState{AppID: tl.appID, ExecutablePath: tl.exe}}
-	}
-
-	for i := len(chain) - 1; i >= 0; i-- {
-		applyDelta(&base.App, chain[i].Delta)
-	}
-
-	sel := tl.snapshots[idx]
-	return &sel, base, nil
 }
 
-func (e *Engine) applyRetentionLocked(tl *appTimeline) {
-	if e.cfg.Retention <= 0 {
-		return
+// Changed reports whether next differs from prev in a way worth a new snapshot.
+// Focus, Z-order and window titles change constantly and alone do not count.
+func Changed(prev, next *state.AppState) bool {
+	if prev.PID != next.PID || len(prev.Windows) != len(next.Windows) {
+		return true
 	}
-	cut := time.Now().Add(-e.cfg.Retention)
-	var kept []Snapshot
-	for _, s := range tl.snapshots {
-		if s.Timestamp.After(cut) {
-			kept = append(kept, s)
-		}
-	}
-	tl.snapshots = kept
-}
-
-func diffStates(prev *state.AppState, next *state.AppState) StateDelta {
-	fmt.Printf("[DEBUG] diffStates: prev windows=%d, next windows=%d\n", len(prev.Windows), len(next.Windows))
-	prevW := map[uintptr]state.WindowState{}
+	pw := map[uintptr]state.WindowState{}
 	for _, w := range prev.Windows {
-		prevW[w.HWND] = w
+		pw[w.HWND] = w
 	}
-	nextW := map[uintptr]state.WindowState{}
-	for _, w := range next.Windows {
-		nextW[w.HWND] = w
-	}
-
-	var diffs []WindowDiff
-	for hwnd, nw := range nextW {
-		pw, ok := prevW[hwnd]
-		if !ok {
-			cp := nw
-			diffs = append(diffs, WindowDiff{HWND: hwnd, Before: nil, After: &cp})
-			continue
-		}
-		if !windowEq(&pw, &nw) {
-			before := pw
-			after := nw
-			diffs = append(diffs, WindowDiff{HWND: hwnd, Before: &before, After: &after})
+	for _, nw := range next.Windows {
+		ow, ok := pw[nw.HWND]
+		if !ok || !sameGeometry(&ow, &nw) || ow.Path != nw.Path {
+			return true
 		}
 	}
-	for hwnd, pw := range prevW {
-		if _, ok := nextW[hwnd]; !ok {
-			before := pw
-			diffs = append(diffs, WindowDiff{HWND: hwnd, Before: &before, After: nil})
-		}
+	added, removed := diffFiles(prev.OpenFiles, next.OpenFiles)
+	if len(added) > 0 || len(removed) > 0 {
+		return true
 	}
-	fmt.Printf("[DEBUG] diffStates: found %d window diffs\n", len(diffs))
-
-	prevF := map[string]struct{}{}
-	for _, f := range prev.OpenFiles {
-		prevF[stringsToLower(f.Path)] = struct{}{}
-	}
-	nextF := map[string]struct{}{}
-	for _, f := range next.OpenFiles {
-		nextF[stringsToLower(f.Path)] = struct{}{}
-	}
-	var added []state.FileRef
-	for p := range nextF {
-		if _, ok := prevF[p]; !ok {
-			added = append(added, state.FileRef{Path: p})
-		}
-	}
-	var removed []state.FileRef
-	for p := range prevF {
-		if _, ok := nextF[p]; !ok {
-			removed = append(removed, state.FileRef{Path: p})
-		}
-	}
-
-	clipChanged := prev.ClipboardHash != "" && next.ClipboardHash != "" && prev.ClipboardHash != next.ClipboardHash
-
-	pluginChanged := !jsonEq(prev.PluginData, next.PluginData)
-
-	return StateDelta{
-		WindowsChanged:   len(diffs) > 0,
-		WindowDiffs:      diffs,
-		FilesAdded:       added,
-		FilesRemoved:     removed,
-		ClipboardChanged: clipChanged,
-		PluginChanged:    pluginChanged,
-		PluginData:       next.PluginData,
-	}
+	return !pluginEq(prev.PluginData, next.PluginData)
 }
 
-func applyDelta(app *state.AppState, d StateDelta) {
-	if d.WindowsChanged {
-		m := map[uintptr]state.WindowState{}
-		for _, w := range app.Windows {
-			m[w.HWND] = w
-		}
-		for _, wd := range d.WindowDiffs {
-			if wd.After == nil {
-				delete(m, wd.HWND)
-				continue
-			}
-			m[wd.HWND] = *wd.After
-		}
-		var ws []state.WindowState
-		for _, w := range m {
-			ws = append(ws, w)
-		}
-		sort.Slice(ws, func(i, j int) bool { return ws[i].ZOrder < ws[j].ZOrder })
-		app.Windows = ws
-	}
-	if len(d.FilesAdded) > 0 || len(d.FilesRemoved) > 0 {
-		m := map[string]state.FileRef{}
-		for _, f := range app.OpenFiles {
-			m[stringsToLower(f.Path)] = f
-		}
-		for _, f := range d.FilesRemoved {
-			delete(m, stringsToLower(f.Path))
-		}
-		for _, f := range d.FilesAdded {
-			m[stringsToLower(f.Path)] = f
-		}
-		var fs []state.FileRef
-		for _, f := range m {
-			fs = append(fs, f)
-		}
-		sort.Slice(fs, func(i, j int) bool { return fs[i].Path < fs[j].Path })
-		app.OpenFiles = fs
-	}
-	if d.ClipboardChanged {
-	}
-	if d.PluginChanged {
-		app.PluginData = d.PluginData
-	}
+func sameGeometry(a, b *state.WindowState) bool {
+	return a.NormalRect == b.NormalRect &&
+		a.Rect == b.Rect &&
+		a.ShowCmd == b.ShowCmd &&
+		a.MonitorID == b.MonitorID
 }
 
-func windowEq(a, b *state.WindowState) bool {
-	return a.Rect == b.Rect &&
-		a.MonitorID == b.MonitorID &&
-		a.ZOrder == b.ZOrder &&
-		a.IsForeground == b.IsForeground &&
-		a.IsMinimized == b.IsMinimized &&
-		a.IsMaximized == b.IsMaximized &&
-		a.VirtualDesktop == b.VirtualDesktop
+func diffFiles(prev, next []state.FileRef) (added, removed []string) {
+	p := map[string]bool{}
+	for _, f := range prev {
+		p[strings.ToLower(f.Path)] = true
+	}
+	n := map[string]bool{}
+	for _, f := range next {
+		k := strings.ToLower(f.Path)
+		n[k] = true
+		if !p[k] {
+			added = append(added, f.Path)
+		}
+	}
+	for _, f := range prev {
+		if !n[strings.ToLower(f.Path)] {
+			removed = append(removed, f.Path)
+		}
+	}
+	return added, removed
 }
 
-func stringsToLower(s string) string {
-	return strings.ToLower(strings.TrimSpace(s))
-}
-
-func jsonEq(a, b any) bool {
+func pluginEq(a, b map[string]state.PluginState) bool {
+	if len(a) == 0 && len(b) == 0 {
+		return true
+	}
 	aj, _ := json.Marshal(a)
 	bj, _ := json.Marshal(b)
 	return bytes.Equal(aj, bj)
 }
 
-func (e *Engine) spillFullSnapshotLocked(appID string, fs *FullSnapshot) (string, error) {
-	_ = os.MkdirAll(e.cfg.StorageDir, 0o755)
-	raw, err := json.Marshal(fs)
-	if err != nil {
-		return "", err
-	}
-	sum := sha256.Sum256(raw)
-	name := hex.EncodeToString(sum[:16]) + ".json.gz"
-	path := filepath.Join(e.cfg.StorageDir, appID, name)
-	_ = os.MkdirAll(filepath.Dir(path), 0o755)
+// ---- persistence ----
 
-	var buf bytes.Buffer
-	zw := gzip.NewWriter(&buf)
-	_, _ = zw.Write(raw)
-	_ = zw.Close()
-	if err := os.WriteFile(path, buf.Bytes(), 0o644); err != nil {
-		return "", err
-	}
-	return filepath.ToSlash(filepath.Join(appID, name)), nil
+func (e *Engine) fileFor(appID string) string {
+	safe := strings.Map(func(r rune) rune {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9', r == '.', r == '-', r == '_':
+			return r
+		}
+		return '_'
+	}, appID)
+	return filepath.Join(e.cfg.StorageDir, safe+".json.gz")
 }
 
-func (e *Engine) loadFullSnapshotLocked(ref string) (*FullSnapshot, error) {
-	path := filepath.Join(e.cfg.StorageDir, filepath.FromSlash(ref))
-	b, err := os.ReadFile(path)
+// Load reads persisted timelines. Missing or corrupt files are skipped.
+func (e *Engine) Load() error {
+	if e.cfg.StorageDir == "" {
+		return nil
+	}
+	files, err := filepath.Glob(filepath.Join(e.cfg.StorageDir, "*.json.gz"))
+	if err != nil {
+		return err
+	}
+	if leftovers, _ := filepath.Glob(filepath.Join(e.cfg.StorageDir, "*.json.gz.tmp")); len(leftovers) > 0 {
+		for _, f := range leftovers {
+			_ = os.Remove(f) // from an interrupted save
+		}
+	}
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	for _, f := range files {
+		tl, err := readTimeline(f)
+		if err != nil || tl == nil || tl.AppID == "" {
+			continue
+		}
+		e.trimLocked(tl)
+		tl.dirty = false
+		if len(tl.Snapshots) == 0 {
+			_ = os.Remove(f)
+			continue
+		}
+		e.apps[tl.AppID] = tl
+	}
+	return nil
+}
+
+func readTimeline(path string) (*appTimeline, error) {
+	f, err := os.Open(path)
 	if err != nil {
 		return nil, err
 	}
-	zr, err := gzip.NewReader(bytes.NewReader(b))
+	defer f.Close()
+	zr, err := gzip.NewReader(f)
 	if err != nil {
 		return nil, err
 	}
 	defer zr.Close()
-	raw, err := ioReadAllLimit(zr, 10<<20) // 10MB guard
+	raw, err := io.ReadAll(io.LimitReader(zr, 64<<20))
 	if err != nil {
 		return nil, err
 	}
-	var fs FullSnapshot
-	if err := json.Unmarshal(raw, &fs); err != nil {
+	var tf timelineFile
+	if err := json.Unmarshal(raw, &tf); err != nil {
 		return nil, err
 	}
-	return &fs, nil
+	if tf.Version != fileFormatVersion {
+		return nil, errors.New("unsupported timeline version")
+	}
+	return tf.Timeline, nil
 }
 
-func ioReadAllLimit(r *gzip.Reader, limit int64) ([]byte, error) {
-	var buf bytes.Buffer
-	if _, err := buf.ReadFrom(io.LimitReader(r, limit)); err != nil {
-		return nil, err
+// Save writes every changed timeline to disk atomically.
+func (e *Engine) Save() error {
+	if e.cfg.StorageDir == "" {
+		return nil
 	}
-	return buf.Bytes(), nil
+	if err := os.MkdirAll(e.cfg.StorageDir, 0o755); err != nil {
+		return err
+	}
+	type job struct {
+		path string
+		data []byte
+		tl   *appTimeline
+	}
+	var jobs []job
+	e.mu.Lock()
+	for _, tl := range e.apps {
+		if !tl.dirty {
+			continue
+		}
+		raw, err := json.Marshal(timelineFile{Version: fileFormatVersion, Timeline: tl})
+		if err != nil {
+			continue
+		}
+		tl.dirty = false
+		jobs = append(jobs, job{path: e.fileFor(tl.AppID), data: raw, tl: tl})
+	}
+	e.mu.Unlock()
+
+	var firstErr error
+	for _, j := range jobs {
+		if err := writeGzipAtomic(j.path, j.data); err != nil {
+			e.mu.Lock()
+			j.tl.dirty = true
+			e.mu.Unlock()
+			if firstErr == nil {
+				firstErr = err
+			}
+		}
+	}
+	return firstErr
 }
+
+func writeGzipAtomic(path string, data []byte) error {
+	var buf bytes.Buffer
+	zw := gzip.NewWriter(&buf)
+	if _, err := zw.Write(data); err != nil {
+		return err
+	}
+	if err := zw.Close(); err != nil {
+		return err
+	}
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, buf.Bytes(), 0o644); err != nil {
+		return err
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		// Some file system filters (sandboxes, sync clients, AV) refuse the rename.
+		// Fall back to a direct write: a torn file is skipped by Load anyway.
+		_ = os.Remove(tmp)
+		return os.WriteFile(path, buf.Bytes(), 0o644)
+	}
+	return nil
+}
+
+func (e *Engine) Close() error { return e.Save() }

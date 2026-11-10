@@ -1,266 +1,221 @@
+//go:build windows
+
 package restore
 
 import (
 	"errors"
 	"fmt"
+	"sort"
 	"time"
-	"unsafe"
 
 	"Rewinder/internal/plugins"
 	"Rewinder/internal/snapshot"
 	"Rewinder/internal/state"
-
-	"golang.org/x/sys/windows"
+	"Rewinder/internal/winapi"
 )
 
 type ProgressFn func(stage string, percent int, msg string)
 
-type Engine struct{}
+type Engine struct {
+	cap     *state.CaptureEngine
+	plugins *plugins.Registry
 
-func NewEngine() *Engine { return &Engine{} }
+	LaunchTimeout time.Duration // how long to wait for a relaunched app's windows
+	ReopenTimeout time.Duration // how long to wait for reopened documents/folders
+	SettleDelay   time.Duration // apps often move their own window right after start
+}
 
-func (e *Engine) RestoreSnapshot(progress ProgressFn, snap *snapshot.Snapshot, full *snapshot.FullSnapshot) error {
-	if full == nil {
-		return errors.New("no snapshot state")
+func NewEngine(cap *state.CaptureEngine, reg *plugins.Registry) *Engine {
+	return &Engine{
+		cap:           cap,
+		plugins:       reg,
+		LaunchTimeout: 15 * time.Second,
+		ReopenTimeout: 8 * time.Second,
+		SettleDelay:   800 * time.Millisecond,
 	}
-	app := full.App
-	plugins.DefaultRegistry().Restore(&app)
-	progress("ensure_process", 15, "Ensuring process exists")
+}
 
-	pid := app.PID
-	if pid <= 0 || !processExists(pid) {
-		npid, err := relaunch(app.ExecutablePath, app.CommandLine, app.WorkingDir)
-		if err != nil {
-			return err
+// Result says what a restore actually did.
+type Result struct {
+	Relaunched bool
+	Reopened   int
+	Matched    int
+	Saved      int
+}
+
+func (e *Engine) RestoreSnapshot(progress ProgressFn, _ *snapshot.Snapshot, full *snapshot.FullSnapshot) (Result, error) {
+	var res Result
+	if full == nil {
+		return res, errors.New("no snapshot state")
+	}
+	saved := full.App.Clone()
+	res.Saved = len(saved.Windows)
+	if saved.ExecutablePath == "" {
+		return res, errors.New("snapshot has no executable path")
+	}
+
+	progress("find_instance", 10, "Looking for running instance")
+	live := e.liveState(&saved)
+
+	if len(live.Windows) == 0 {
+		progress("relaunch", 25, "Starting "+saved.ExecutablePath)
+		if err := e.relaunch(&saved); err != nil {
+			return res, fmt.Errorf("could not start the app: %w", err)
 		}
-		pid = npid
-		progress("wait_windows", 35, "Waiting for main window")
-		_ = waitForAnyWindow(pid, 5*time.Second)
+		res.Relaunched = true
+		progress("wait_windows", 40, "Waiting for windows")
+		live = e.waitForWindows(&saved, e.LaunchTimeout)
+		if len(live.Windows) == 0 {
+			return res, errors.New("the app started but no window appeared")
+		}
+	} else if n := e.plugins.Reopen(&saved, live); n > 0 {
+		res.Reopened = n
+		progress("reopen", 30, fmt.Sprintf("Reopening %d item(s)", n))
+		live = e.waitForWindows(&saved, e.ReopenTimeout)
+	}
+
+	if len(saved.Windows) == 0 {
+		return res, nil
 	}
 
 	progress("restore_windows", 60, "Restoring window positions")
-	if err := restoreWindows(pid, app.Windows); err != nil {
-		return err
+	moved, blocked := e.apply(&saved, live)
+	if blocked {
+		return res, errors.New("Windows refused to move the app's windows; if the app runs as administrator, run Rewinder as administrator too")
+	}
+	if moved == 0 {
+		return res, errors.New("none of the saved windows could be found")
+	}
+	res.Matched = moved
+	if res.Relaunched || res.Reopened > 0 {
+		time.Sleep(e.SettleDelay)
+		if again, _ := e.apply(&saved, e.liveState(&saved)); again > 0 {
+			res.Matched = again
+		}
 	}
 
 	progress("restore_focus", 90, "Restoring focus")
-	restoreFocus(pid, app.Windows)
+	return res, nil
+}
+
+// liveState captures every current app window of the saved executable,
+// whatever process owns it.
+func (e *Engine) liveState(saved *state.AppState) *state.AppState {
+	hwnds := winapi.AppWindowsByExe(saved.ExecutablePath)
+	if len(hwnds) == 0 {
+		return &state.AppState{ExecutablePath: saved.ExecutablePath, PluginData: map[string]state.PluginState{}}
+	}
+	byPID := map[uint32]int{}
+	for _, h := range hwnds {
+		byPID[winapi.WindowPID(h)]++
+	}
+	var main uint32
+	for pid, n := range byPID {
+		if n > byPID[main] {
+			main = pid
+		}
+	}
+	live, err := e.cap.CaptureProcess(int(main))
+	if err != nil {
+		live = &state.AppState{ExecutablePath: saved.ExecutablePath, PID: int(main), PluginData: map[string]state.PluginState{}}
+	}
+	fg := winapi.ForegroundWindow()
+	live.Windows = live.Windows[:0]
+	for i, h := range hwnds {
+		live.Windows = append(live.Windows, state.DescribeWindow(h, i, h == fg))
+	}
+	e.plugins.Capture(live)
+	return live
+}
+
+func (e *Engine) relaunch(saved *state.AppState) error {
+	if handled, err := e.plugins.Relaunch(saved); handled {
+		return err
+	}
+	if saved.AppUserModelID != "" {
+		return winapi.LaunchPackaged(saved.AppUserModelID)
+	}
+	if _, err := winapi.Launch(saved.ExecutablePath, saved.CommandLine, saved.WorkingDir); err != nil {
+		// e.g. ERROR_ELEVATION_REQUIRED: let the shell handle it
+		return winapi.ShellOpen(saved.ExecutablePath)
+	}
 	return nil
 }
 
-func processExists(pid int) bool {
-	h, err := windows.OpenProcess(windows.PROCESS_QUERY_LIMITED_INFORMATION, false, uint32(pid))
-	if err != nil {
-		return false
+// waitForWindows polls until the app shows as many windows as were saved and the
+// count holds steady, or the timeout passes. It returns the last capture.
+func (e *Engine) waitForWindows(saved *state.AppState, timeout time.Duration) *state.AppState {
+	want := len(saved.Windows)
+	if want == 0 {
+		want = 1
 	}
-	_ = windows.CloseHandle(h)
-	return true
-}
-
-func relaunch(exePath, cmdLine, workingDir string) (int, error) {
-	if exePath == "" && cmdLine == "" {
-		return 0, errors.New("missing executable path/command line")
-	}
-
-	app := exePath
-	args := cmdLine
-	if args == "" {
-		args = fmt.Sprintf("\"%s\"", exePath)
-	}
-
-	var si windows.StartupInfo
-	var pi windows.ProcessInformation
-	si.Cb = uint32(unsafe.Sizeof(si))
-
-	var wd *uint16
-	if workingDir != "" {
-		wd, _ = windows.UTF16PtrFromString(workingDir)
-	}
-	cl, _ := windows.UTF16PtrFromString(args)
-	var appPtr *uint16
-	if app != "" {
-		appPtr, _ = windows.UTF16PtrFromString(app)
-	}
-	err := windows.CreateProcess(appPtr, cl, nil, nil, false, 0, nil, wd, &si, &pi)
-	if err != nil {
-		return 0, err
-	}
-	_ = windows.CloseHandle(pi.Thread)
-	_ = windows.CloseHandle(pi.Process)
-	return int(pi.ProcessId), nil
-}
-
-func waitForAnyWindow(pid int, timeout time.Duration) bool {
 	deadline := time.Now().Add(timeout)
+	live := e.liveState(saved)
+	stable := 0
 	for time.Now().Before(deadline) {
-		if hasAnyWindow(pid) {
-			return true
+		time.Sleep(250 * time.Millisecond)
+		next := e.liveState(saved)
+		if len(next.Windows) >= want && len(next.Windows) == len(live.Windows) {
+			stable++
+			if stable >= 2 {
+				return next
+			}
+		} else {
+			stable = 0
 		}
-		time.Sleep(100 * time.Millisecond)
+		live = next
 	}
-	return false
+	return live
 }
 
-func hasAnyWindow(pid int) bool {
-	found := false
-	cb := windows.NewCallback(func(hwnd uintptr, lParam uintptr) uintptr {
-		if int(getWindowPID(hwnd)) == pid {
-			found = true
-			return 0
-		}
-		return 1
-	})
-	_, _, _ = procEnumWindows.Call(cb, 0)
-	return found
-}
-
-func restoreWindows(pid int, windowsSaved []state.WindowState) error {
-	current := enumerateWindowsForPID(pid)
-	if len(current) == 0 {
-		return nil
+// apply puts matched windows back. It returns how many windows were actually
+// moved, and blocked=true when windows matched but Windows refused every change
+// (typically because the target app runs as administrator and we do not).
+func (e *Engine) apply(saved *state.AppState, live *state.AppState) (moved int, blocked bool) {
+	m := MatchWindows(saved.Windows, live.Windows)
+	if len(m) == 0 {
+		return 0, false
 	}
-
-	for _, sw := range windowsSaved {
-		target := sw.HWND
-		if target != 0 && isWindow(target) && int(getWindowPID(target)) == pid {
-			applyWindowState(target, sw)
-			continue
-		}
-		best := findBestWindow(current, sw)
-		if best != 0 {
-			applyWindowState(best, sw)
+	type pair struct {
+		saved state.WindowState
+		hwnd  uintptr
+	}
+	var pairs []pair
+	for si, li := range m {
+		pairs = append(pairs, pair{saved: saved.Windows[si], hwnd: live.Windows[li].HWND})
+	}
+	for _, p := range pairs {
+		if err := winapi.SetPlacement(p.hwnd, p.saved.Placement()); err == nil {
+			moved++
 		}
 	}
-
-	sortByZ(windowsSaved)
-	for _, sw := range windowsSaved {
-		h := sw.HWND
-		if h != 0 && isWindow(h) && int(getWindowPID(h)) == pid {
-			_, _, _ = procBringWindowToTop.Call(h)
-		}
+	if moved == 0 {
+		return 0, true
 	}
 
-	return nil
-}
-
-func restoreFocus(pid int, saved []state.WindowState) {
-	for _, sw := range saved {
-		if sw.IsForeground {
-			h := sw.HWND
-			if h != 0 && isWindow(h) && int(getWindowPID(h)) == pid {
-				_, _, _ = procSetForegroundWindow.Call(h)
-				return
+	// Raise bottom-most first so the saved topmost window ends up on top.
+	sort.Slice(pairs, func(i, j int) bool { return pairs[i].saved.ZOrder > pairs[j].saved.ZOrder })
+	for _, p := range pairs {
+		if !p.saved.IsMinimized {
+			winapi.BringToTop(p.hwnd)
+		}
+	}
+	focus := uintptr(0)
+	for _, p := range pairs {
+		if p.saved.IsForeground && !p.saved.IsMinimized {
+			focus = p.hwnd
+		}
+	}
+	if focus == 0 {
+		for i := len(pairs) - 1; i >= 0; i-- {
+			if !pairs[i].saved.IsMinimized {
+				focus = pairs[i].hwnd
+				break
 			}
 		}
 	}
-	for _, h := range enumerateWindowsForPID(pid) {
-		_, _, _ = procSetForegroundWindow.Call(h)
-		return
+	if focus != 0 {
+		winapi.SetForeground(focus)
 	}
-}
-
-func enumerateWindowsForPID(pid int) []uintptr {
-	var out []uintptr
-	cb := windows.NewCallback(func(hwnd uintptr, lParam uintptr) uintptr {
-		if int(getWindowPID(hwnd)) == pid {
-			out = append(out, hwnd)
-		}
-		return 1
-	})
-	_, _, _ = procEnumWindows.Call(cb, 0)
-	return out
-}
-
-func findBestWindow(current []uintptr, sw state.WindowState) uintptr {
-	for _, h := range current {
-		if getClassName(h) == sw.ClassName && getTitle(h) == sw.Title {
-			return h
-		}
-	}
-	for _, h := range current {
-		if getClassName(h) == sw.ClassName {
-			return h
-		}
-	}
-	if len(current) > 0 {
-		return current[0]
-	}
-	return 0
-}
-
-func applyWindowState(hwnd uintptr, sw state.WindowState) {
-	if sw.IsMinimized {
-		_, _, _ = procShowWindow.Call(hwnd, SW_SHOWMINIMIZED)
-	} else if sw.IsMaximized {
-		_, _, _ = procShowWindow.Call(hwnd, SW_SHOWMAXIMIZED)
-	} else {
-		_, _, _ = procShowWindow.Call(hwnd, SW_SHOWNORMAL)
-	}
-
-	r := sw.Rect
-	_, _, _ = procMoveWindow.Call(hwnd, uintptr(r.Left), uintptr(r.Top), uintptr(r.Right-r.Left), uintptr(r.Bottom-r.Top), 1)
-}
-
-func sortByZ(ws []state.WindowState) {
-	for i := 1; i < len(ws); i++ {
-		j := i
-		for j > 0 && ws[j-1].ZOrder > ws[j].ZOrder {
-			ws[j-1], ws[j] = ws[j], ws[j-1]
-			j--
-		}
-	}
-}
-
-var (
-	user32                       = windows.NewLazySystemDLL("user32.dll")
-	procEnumWindows              = user32.NewProc("EnumWindows")
-	procGetWindowThreadProcessId = user32.NewProc("GetWindowThreadProcessId")
-	procIsWindow                 = user32.NewProc("IsWindow")
-	procMoveWindow               = user32.NewProc("MoveWindow")
-	procShowWindow               = user32.NewProc("ShowWindow")
-	procSetForegroundWindow      = user32.NewProc("SetForegroundWindow")
-	procBringWindowToTop         = user32.NewProc("BringWindowToTop")
-	procGetClassNameW            = user32.NewProc("GetClassNameW")
-	procGetWindowTextW           = user32.NewProc("GetWindowTextW")
-	procGetWindowTextLengthW     = user32.NewProc("GetWindowTextLengthW")
-)
-
-const (
-	SW_SHOWNORMAL    = 1
-	SW_SHOWMINIMIZED = 2
-	SW_SHOWMAXIMIZED = 3
-)
-
-func getWindowPID(hwnd uintptr) uint32 {
-	var pid uint32
-	_, _, _ = procGetWindowThreadProcessId.Call(hwnd, uintptr(unsafe.Pointer(&pid)))
-	return pid
-}
-
-func isWindow(hwnd uintptr) bool {
-	r1, _, _ := procIsWindow.Call(hwnd)
-	return r1 != 0
-}
-
-func getClassName(hwnd uintptr) string {
-	buf := make([]uint16, 256)
-	r1, _, _ := procGetClassNameW.Call(hwnd, uintptr(unsafe.Pointer(&buf[0])), uintptr(len(buf)))
-	if r1 == 0 {
-		return ""
-	}
-	return windows.UTF16ToString(buf[:r1])
-}
-
-func getTitle(hwnd uintptr) string {
-	r1, _, _ := procGetWindowTextLengthW.Call(hwnd)
-	n := int(r1)
-	if n <= 0 {
-		return ""
-	}
-	buf := make([]uint16, n+1)
-	r2, _, _ := procGetWindowTextW.Call(hwnd, uintptr(unsafe.Pointer(&buf[0])), uintptr(len(buf)))
-	if r2 == 0 {
-		return ""
-	}
-	return windows.UTF16ToString(buf[:r2])
+	return moved, false
 }

@@ -3,6 +3,7 @@
 package services
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 
@@ -11,6 +12,18 @@ import (
 
 const registryKey = `SOFTWARE\Microsoft\Windows\CurrentVersion\Run`
 const appName = "Rewinder"
+const autostartFlag = "--autostart"
+
+// StartedByAutostart reports whether Windows launched us at sign-in; then the
+// window stays hidden and Rewinder lives in the tray.
+func StartedByAutostart(args []string) bool {
+	for _, a := range args {
+		if a == autostartFlag {
+			return true
+		}
+	}
+	return false
+}
 
 func IsAutostartEnabled() bool {
 	key, err := registry.OpenKey(registry.CURRENT_USER, registryKey, registry.QUERY_VALUE)
@@ -18,7 +31,6 @@ func IsAutostartEnabled() bool {
 		return false
 	}
 	defer key.Close()
-
 	_, _, err = key.GetStringValue(appName)
 	return err == nil
 }
@@ -30,14 +42,15 @@ func SetAutostart(enabled bool) error {
 	}
 	defer key.Close()
 
-	if enabled {
-		exePath, err := os.Executable()
-		if err != nil {
+	if !enabled {
+		if err := key.DeleteValue(appName); err != nil && !errors.Is(err, registry.ErrNotExist) {
 			return err
 		}
-		exePath = filepath.Clean(exePath)
-		return key.SetStringValue(appName, exePath)
-	} else {
-		return key.DeleteValue(appName)
+		return nil
 	}
+	exePath, err := os.Executable()
+	if err != nil {
+		return err
+	}
+	return key.SetStringValue(appName, `"`+filepath.Clean(exePath)+`" `+autostartFlag)
 }

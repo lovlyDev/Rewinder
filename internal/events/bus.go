@@ -1,48 +1,38 @@
 package events
 
-import (
-	"errors"
-	"sync"
-)
+import "sync"
 
 type EventType string
 
 const (
 	EventForegroundChanged EventType = "foreground_changed"
 	EventWindowMoved       EventType = "window_moved"
-	EventWindowDestroyed   EventType = "window_destroyed"
 	EventWindowShown       EventType = "window_shown"
 	EventWindowHidden      EventType = "window_hidden"
-	EventProcessStarted    EventType = "process_started"
-	EventProcessExited     EventType = "process_exited"
-	EventClipboardChanged  EventType = "clipboard_changed"
 )
 
 type SystemEvent struct {
-	Type      EventType      `json:"type"`
-	Timestamp int64          `json:"timestampUTC"`
-	PID       int            `json:"pid"`
-	HWND      uintptr        `json:"hwnd"`
-	Metadata  map[string]any `json:"metadata,omitempty"`
+	Type      EventType `json:"type"`
+	Timestamp int64     `json:"timestampUTC"`
+	PID       int       `json:"pid"`
+	HWND      uintptr   `json:"hwnd"`
 }
 
 type Bus struct {
-	ch     chan SystemEvent
-	stopCh chan struct{}
-	once   sync.Once
-
-	win *windowsSources
+	ch   chan SystemEvent
+	once sync.Once
+	mu   sync.Mutex
+	win  *windowsSources
 }
 
 func NewBus(buffer int) *Bus {
-	return &Bus{
-		ch:     make(chan SystemEvent, buffer),
-		stopCh: make(chan struct{}),
-	}
+	return &Bus{ch: make(chan SystemEvent, buffer)}
 }
 
 func (b *Bus) Events() <-chan SystemEvent { return b.ch }
 
+// Emit never blocks: under a flood the oldest pending events are the ones that
+// matter least, and the capture loop debounces per process anyway.
 func (b *Bus) Emit(ev SystemEvent) {
 	select {
 	case b.ch <- ev:
@@ -50,22 +40,22 @@ func (b *Bus) Emit(ev SystemEvent) {
 	}
 }
 
-func (b *Bus) StartWindowsSources() error {
+func (b *Bus) StartWindowsSources() {
+	b.mu.Lock()
+	defer b.mu.Unlock()
 	if b.win != nil {
-		return nil
+		return
 	}
-	ws, err := newWindowsSources(b.Emit, b.stopCh)
-	if err != nil {
-		return err
-	}
-	b.win = ws
-	return ws.start()
+	b.win = newWindowsSources(b.Emit)
+	b.win.start()
 }
 
 func (b *Bus) Stop() {
 	b.once.Do(func() {
-		close(b.stopCh)
+		b.mu.Lock()
+		defer b.mu.Unlock()
+		if b.win != nil {
+			b.win.stop()
+		}
 	})
 }
-
-var ErrNotSupported = errors.New("not supported")

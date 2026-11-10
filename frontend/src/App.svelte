@@ -1,8 +1,8 @@
 <script lang="ts">
-  import { onMount } from 'svelte';
+  import { onMount, tick } from 'svelte';
   import type { ipcapi } from '../wailsjs/go/models';
-  import { GetApps, GetTimeline, Restore, PauseTracking, ResumeTracking, ShowTimelineWindow, OverlayEnd, ExitApp, GetAutostart, SetAutostart } from '../wailsjs/go/main/App.js';
-  import { EventsOn, WindowHide, WindowUnfullscreen, WindowSetAlwaysOnTop } from '../wailsjs/runtime/runtime.js';
+  import { GetApps, GetTimeline, Restore, PauseTracking, ResumeTracking, ShowTimelineWindow, HideOverlay, ExitApp, GetAutostart, SetAutostart, LogUI } from '../wailsjs/go/main/App.js';
+  import { EventsOn } from '../wailsjs/runtime/runtime.js';
 
   type View = 'timeline' | 'overlay' | 'settings';
 
@@ -19,6 +19,7 @@
   let overlaySnapshots: ipcapi.SnapshotMeta[] = [];
   let overlayIndex = 0;
   let overlayAppID: string | null = null;
+  let overlayEl: HTMLDivElement | null = null;
 
   let autostartEnabled = false;
 
@@ -75,20 +76,33 @@
     }
   }
 
-  function openOverlay(appID?: string) {
-    overlayAppID = appID ?? (apps[0]?.appID ?? null);
-    if (overlayAppID && overlayAppID !== selectedAppID) {
-      GetTimeline(overlayAppID).then((snapshots) => {
-        overlaySnapshots = snapshots;
-        overlayIndex = 0;
-        view = 'overlay';
-      });
-    } else {
-      overlaySnapshots = overlayAppID ? (timeline.filter(t => t.appID === overlayAppID)) : [];
-      overlayIndex = 0;
-      view = 'overlay';
+  async function openOverlay(appID?: string) {
+    try {
+      apps = await GetApps();
+    } catch {
+      // keep the list we have
     }
+    // The hotkey passes the app the user was in; if it has no history, fall back to the latest app.
+    const known = appID && apps.some(a => a.appID === appID);
+    overlayAppID = known ? appID! : (apps[0]?.appID ?? null);
+    overlaySnapshots = [];
+    if (overlayAppID) {
+      try {
+        overlaySnapshots = await GetTimeline(overlayAppID);
+      } catch (e: any) {
+        pushToast('error', `GetTimeline failed: ${e?.message ?? e}`);
+      }
+    }
+    // Newest snapshot is the current state; start one step back, which is what "undo" means.
+    overlayIndex = Math.min(1, Math.max(0, overlaySnapshots.length - 1));
+    view = 'overlay';
+    await tick();
+    window.focus();
+    overlayEl?.focus();
+    void LogUI(`overlay open app=${overlayAppID} requested=${appID ?? ''} snapshots=${overlaySnapshots.length} index=${overlayIndex}`);
   }
+
+  $: overlayAppName = apps.find(a => a.appID === overlayAppID)?.name ?? '';
 
   async function doRestore(appID: string, snapshotID: string) {
     try {
@@ -102,14 +116,23 @@
 
   function closeOverlay() {
     view = 'timeline';
-    void OverlayEnd();
-    WindowSetAlwaysOnTop(false);
-    WindowUnfullscreen();
-    WindowHide();
+    void HideOverlay();
+  }
+
+  // Hide the overlay first, so restored windows are not covered by it and can take focus.
+  function restoreFromOverlay() {
+    const snap = overlaySnapshots[overlayIndex];
+    const appID = overlayAppID;
+    void LogUI(`overlay restore app=${appID} index=${overlayIndex} snapshot=${snap?.snapshotID ?? 'none'}`);
+    closeOverlay();
+    if (appID && snap?.snapshotID) {
+      void doRestore(appID, snap.snapshotID);
+    }
   }
 
   function handleOverlayKey(e: KeyboardEvent) {
     if (view !== 'overlay') return;
+    if (e.key === 'Escape' || e.key === 'Enter') void LogUI(`overlay key ${e.key}`);
     if (e.key === 'Escape') {
       e.preventDefault();
       closeOverlay();
@@ -127,11 +150,7 @@
     }
     if (e.key === 'Enter') {
       e.preventDefault();
-      const snap = overlaySnapshots[overlayIndex];
-      if (overlayAppID && snap?.snapshotID) {
-        void doRestore(overlayAppID, snap.snapshotID);
-        closeOverlay();
-      }
+      restoreFromOverlay();
     }
   }
 
@@ -189,8 +208,10 @@
        if (appIndex !== -1) {
          apps[appIndex].snapshotCount += 1;
          apps = [...apps];
+       } else {
+         // a newly tracked app: reload the list so it shows up
+         void GetApps().then(list => (apps = list)).catch(() => {});
        }
-       // Уменьшаем частоту обновлений списка приложений
      }
    });
     const off3 = EventsOn('onRestoreError', (p: RestoreErrorEvent) => {
@@ -199,9 +220,8 @@
     const off4 = EventsOn('onTrackingStateChanged', (p: TrackingStateChangedEvent) => {
       trackingState = (p.state as any) ?? 'active';
     });
-    const off5 = EventsOn('onOverlayOpenRequested', () => {
-      // Убираем лишние обновления
-      openOverlay();
+    const off5 = EventsOn('onOverlayOpenRequested', (p: { appID?: string }) => {
+      void openOverlay(p?.appID || undefined);
     });
     const off6 = EventsOn('onShowTimelineRequested', () => {
       view = 'timeline';
@@ -225,10 +245,10 @@
 </script>
 
 {#if view === 'overlay'}
-  <div class="overlay" role="dialog" aria-label="Quick restore overlay">
+  <div class="overlay" role="dialog" aria-label="Quick restore overlay" tabindex="-1" bind:this={overlayEl}>
     <div class="overlayCard">
       <div class="overlayHeader">
-        <div class="title">Restore</div>
+        <div class="title">Restore{overlayAppName ? ` ${overlayAppName}` : ''}</div>
         <div class="hint">Scroll = time • ← → = step • Enter = restore • Esc = cancel</div>
       </div>
 
@@ -248,7 +268,8 @@
           <div class="preview">
             <div class="when">{new Date(overlaySnapshots[overlayIndex].timestampUTC).toLocaleString()}</div>
             <div class="meta">
-              <span>{overlaySnapshots[overlayIndex].windowsCount} window diffs</span>
+              <span>{overlaySnapshots[overlayIndex].windowsCount} window(s)</span>
+              {#if overlayIndex === 0}<span>current state</span>{/if}
               <span>{overlaySnapshots[overlayIndex].filesAdded}+ / {overlaySnapshots[overlayIndex].filesRemoved}- files</span>
             </div>
           </div>
@@ -256,7 +277,7 @@
             <button class="btn ghost" on:click={closeOverlay}>Cancel</button>
             <button
               class="btn primary"
-              on:click={() => overlayAppID && doRestore(overlayAppID, overlaySnapshots[overlayIndex].snapshotID).then(closeOverlay)}
+              on:click={restoreFromOverlay}
             >
               Restore
             </button>
@@ -339,7 +360,7 @@
                   >
                     <div class="snapWhen">{new Date(s.timestampUTC).toLocaleString()}</div>
                     <div class="snapMeta">
-                      <span>{s.windowsCount} diffs</span>
+                      <span>{s.windowsCount} window(s)</span>
                       <span>{s.filesAdded}+ / {s.filesRemoved}-</span>
                     </div>
                   </button>
@@ -384,7 +405,7 @@
           </div>
           <div class="row">
             <div class="label">Privacy</div>
-            <div class="value">Clipboard hash only (no raw content stored)</div>
+            <div class="value">Window layout, open folders and Office documents only. Stored locally, never sent anywhere.</div>
           </div>
           <div class="row">
             <div class="label">Application</div>

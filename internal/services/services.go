@@ -1,7 +1,13 @@
+//go:build windows
+
 package services
 
 import (
 	"context"
+	"errors"
+	"fmt"
+	"log"
+	"os"
 	"sync"
 	"time"
 
@@ -13,19 +19,24 @@ import (
 	"Rewinder/internal/snapshot"
 	"Rewinder/internal/state"
 	"Rewinder/internal/trayhotkey"
+	"Rewinder/internal/winapi"
+)
+
+const (
+	captureQuiet    = 400 * time.Millisecond // capture once a window has been still this long
+	captureMaxDelay = 3 * time.Second        // ...but never later than this after the first event
+	saveInterval    = 30 * time.Second
 )
 
 type Dependencies struct {
 	EmitEvent          func(name string, data any)
-	OnOverlayRequested func()
+	OnOverlayRequested func(appID string)
 	ShowTimelineWindow func()
 }
 
 type Services struct {
 	deps Dependencies
-
-	cfgMu sync.RWMutex
-	cfg   *policy.Config
+	cfg  *policy.Config
 
 	ev  *events.Bus
 	cap *state.CaptureEngine
@@ -34,245 +45,259 @@ type Services struct {
 	th  *trayhotkey.Manager
 	pl  *plugins.Registry
 
+	selfPID int
+
 	trackingMu sync.RWMutex
 	trackingOn bool
 	appPaused  map[string]bool
-	stopOnce   sync.Once
-	stopCh     chan struct{}
+
+	restoreMu sync.Mutex
+
+	stopOnce sync.Once
+	stopCh   chan struct{}
+	loopDone chan struct{}
 }
 
 func New(deps Dependencies) *Services {
 	cfg := policy.DefaultConfig()
-	bus := events.NewBus(1024)
+	pl := plugins.DefaultRegistry()
+	cap := state.NewCaptureEngine()
+	cap.NeedsOpenFiles = pl.NeedsOpenFiles
+
 	ss := snapshot.NewEngine(snapshot.EngineConfig{
-		MaxSnapshotsPerApp: cfg.ResourceLimits.MaxSnapshotsPerApp,
-		MaxRAMBytes:        cfg.ResourceLimits.MaxRAMBytes,
-		MaxDiskBytes:       cfg.ResourceLimits.MaxDiskBytes,
+		MaxSnapshotsPerApp: cfg.MaxSnapshotsPerApp,
 		Retention:          cfg.Retention,
 		StorageDir:         cfg.StorageDir,
 	})
+	if err := ss.Load(); err != nil {
+		log.Printf("rewinder: loading history: %v", err)
+	}
 
 	return &Services{
 		deps:       deps,
 		cfg:        cfg,
-		ev:         bus,
-		cap:        state.NewCaptureEngine(),
+		ev:         events.NewBus(4096),
+		cap:        cap,
 		ss:         ss,
-		rs:         restore.NewEngine(),
-		pl:         plugins.DefaultRegistry(),
+		rs:         restore.NewEngine(cap, pl),
+		pl:         pl,
+		selfPID:    os.Getpid(),
 		trackingOn: true,
 		appPaused:  map[string]bool{},
 		stopCh:     make(chan struct{}),
+		loopDone:   make(chan struct{}),
+	}
+}
+
+func (s *Services) emit(name string, data any) {
+	if s.deps.EmitEvent != nil {
+		s.deps.EmitEvent(name, data)
 	}
 }
 
 func (s *Services) Start(ctx context.Context) {
 	s.th = trayhotkey.NewManager(trayhotkey.Dependencies{
 		OnOpenTimeline: func() {
-			s.deps.EmitEvent("onShowTimelineRequested", nil)
 			if s.deps.ShowTimelineWindow != nil {
 				s.deps.ShowTimelineWindow()
 			}
 		},
-		OnPauseTracking: func() {
-			s.PauseTracking(nil)
-		},
-		OnResumeTracking: func() {
-			s.ResumeTracking(nil)
-		},
+		OnPauseTracking:  func() { s.PauseTracking(nil) },
+		OnResumeTracking: func() { s.ResumeTracking(nil) },
 		OnOpenSettings: func() {
-			s.deps.EmitEvent("onShowSettingsRequested", nil)
-		},
-		OnExit: func() {
-			s.Stop()
-			s.deps.EmitEvent("onExitRequested", nil)
-		},
-		OnOverlayHotkey: func() {
-			if s.deps.OnOverlayRequested != nil {
-				s.deps.OnOverlayRequested()
+			if s.deps.ShowTimelineWindow != nil {
+				s.deps.ShowTimelineWindow()
 			}
+			s.emit("onShowSettingsRequested", nil)
+		},
+		OnExit: func() { s.emit("onExitRequested", nil) },
+		OnOverlayHotkey: func() {
+			id := s.foregroundAppID()
+			log.Printf("rewinder: hotkey pressed, foreground app %q", id)
+			if s.deps.OnOverlayRequested != nil {
+				s.deps.OnOverlayRequested(id)
+			}
+		},
+		OnHotkeyError: func(err error) {
+			log.Printf("rewinder: %v", err)
+			s.emit("onTrackingStateChanged", ipcapi.TrackingStateChangedEvent{State: "error", Reason: err.Error(), AtUTC: ipcapi.NowUTC()})
 		},
 	})
 	s.th.Start()
-
-	go func() {
-		_ = s.ev.StartWindowsSources()
-	}()
-
+	s.ev.StartWindowsSources()
 	go s.captureLoop()
 
-	s.deps.EmitEvent("onTrackingStateChanged", ipcapi.TrackingStateChangedEvent{
-		AppID:  nil,
-		State:  "active",
-		Reason: "",
-		AtUTC:  ipcapi.NowUTC(),
-	})
+	// Record what is already open, so there is something to go back to right away.
+	go s.captureAllVisible()
+
+	s.emit("onTrackingStateChanged", ipcapi.TrackingStateChangedEvent{State: "active", AtUTC: ipcapi.NowUTC()})
 }
 
 func (s *Services) Stop() {
 	s.stopOnce.Do(func() {
 		close(s.stopCh)
-		if s.th != nil {
+		if s.th != nil { // Start ran, so the capture loop is running
+			<-s.loopDone
 			s.th.Stop()
 		}
-		if s.ev != nil {
-			s.ev.Stop()
-		}
-		if s.ss != nil {
-			_ = s.ss.Close()
+		s.ev.Stop()
+		if err := s.ss.Close(); err != nil {
+			log.Printf("rewinder: saving history: %v", err)
 		}
 	})
+}
+
+// foregroundAppID is the app the user was in when they pressed the hotkey.
+func (s *Services) foregroundAppID() string {
+	pid := int(winapi.WindowPID(winapi.ForegroundWindow()))
+	if pid == 0 || pid == s.selfPID {
+		return ""
+	}
+	return state.StableAppID(winapi.ExePath(uint32(pid)))
 }
 
 func (s *Services) PauseTracking(appID *string) {
 	s.trackingMu.Lock()
-	defer s.trackingMu.Unlock()
 	if appID == nil {
 		s.trackingOn = false
-		s.deps.EmitEvent("onTrackingStateChanged", ipcapi.TrackingStateChangedEvent{
-			AppID:  nil,
-			State:  "paused",
-			Reason: "paused by user",
-			AtUTC:  ipcapi.NowUTC(),
-		})
-		return
+	} else {
+		s.appPaused[*appID] = true
 	}
-	s.appPaused[*appID] = true
-	s.deps.EmitEvent("onTrackingStateChanged", ipcapi.TrackingStateChangedEvent{
-		AppID:  appID,
-		State:  "paused",
-		Reason: "paused by user",
-		AtUTC:  ipcapi.NowUTC(),
-	})
+	s.trackingMu.Unlock()
+	s.emit("onTrackingStateChanged", ipcapi.TrackingStateChangedEvent{AppID: appID, State: "paused", Reason: "paused by user", AtUTC: ipcapi.NowUTC()})
 }
 
 func (s *Services) ResumeTracking(appID *string) {
 	s.trackingMu.Lock()
-	defer s.trackingMu.Unlock()
 	if appID == nil {
 		s.trackingOn = true
-		s.deps.EmitEvent("onTrackingStateChanged", ipcapi.TrackingStateChangedEvent{
-			AppID:  nil,
-			State:  "active",
-			Reason: "resumed by user",
-			AtUTC:  ipcapi.NowUTC(),
-		})
-		return
+	} else {
+		delete(s.appPaused, *appID)
 	}
-	delete(s.appPaused, *appID)
-	s.deps.EmitEvent("onTrackingStateChanged", ipcapi.TrackingStateChangedEvent{
-		AppID:  appID,
-		State:  "active",
-		Reason: "resumed by user",
-		AtUTC:  ipcapi.NowUTC(),
-	})
+	s.trackingMu.Unlock()
+	s.emit("onTrackingStateChanged", ipcapi.TrackingStateChangedEvent{AppID: appID, State: "active", Reason: "resumed by user", AtUTC: ipcapi.NowUTC()})
 }
 
-func (s *Services) GetApps() []ipcapi.AppSummary {
-	return s.ss.GetApps()
-}
+func (s *Services) GetApps() []ipcapi.AppSummary { return s.ss.GetApps() }
 
-func (s *Services) GetTimeline(appID string) []ipcapi.SnapshotMeta {
-	return s.ss.GetTimeline(appID)
-}
+func (s *Services) GetTimeline(appID string) []ipcapi.SnapshotMeta { return s.ss.GetTimeline(appID) }
 
 func (s *Services) Restore(appID string, snapshotID string) error {
-	s.deps.EmitEvent("onRestoreProgress", ipcapi.RestoreProgressEvent{
-		AppID:      appID,
-		SnapshotID: snapshotID,
-		Stage:      "resolve",
-		Percent:    5,
-		Message:    "Resolving snapshot",
-	})
-	snap, full, err := s.ss.ResolveSnapshot(appID, snapshotID)
-	if err != nil {
-		s.deps.EmitEvent("onRestoreError", ipcapi.RestoreErrorEvent{AppID: appID, SnapshotID: snapshotID, Error: err.Error()})
-		return err
+	if !s.restoreMu.TryLock() {
+		return errors.New("another restore is in progress")
 	}
+	defer s.restoreMu.Unlock()
 
 	progress := func(stage string, percent int, msg string) {
-		s.deps.EmitEvent("onRestoreProgress", ipcapi.RestoreProgressEvent{
-			AppID:      appID,
-			SnapshotID: snapshotID,
-			Stage:      stage,
-			Percent:    percent,
-			Message:    msg,
-		})
+		s.emit("onRestoreProgress", ipcapi.RestoreProgressEvent{AppID: appID, SnapshotID: snapshotID, Stage: stage, Percent: percent, Message: msg})
 	}
-
-	err = s.rs.RestoreSnapshot(progress, snap, full)
-	if err != nil {
-		s.deps.EmitEvent("onRestoreError", ipcapi.RestoreErrorEvent{AppID: appID, SnapshotID: snapshotID, Error: err.Error()})
+	fail := func(err error) error {
+		log.Printf("rewinder: restore %s/%s failed: %v", appID, snapshotID, err)
+		s.emit("onRestoreError", ipcapi.RestoreErrorEvent{AppID: appID, SnapshotID: snapshotID, Error: err.Error()})
 		return err
 	}
-	progress("done", 100, "Restore completed")
+	log.Printf("rewinder: restore requested %s/%s", appID, snapshotID)
+
+	progress("resolve", 5, "Resolving snapshot")
+	snap, full, err := s.ss.ResolveSnapshot(appID, snapshotID)
+	if err != nil {
+		return fail(err)
+	}
+	res, err := s.rs.RestoreSnapshot(progress, snap, full)
+	if err != nil {
+		return fail(err)
+	}
+	msg := fmt.Sprintf("Restored %d of %d window(s)", res.Matched, res.Saved)
+	if res.Relaunched {
+		msg += ", app relaunched"
+	}
+	log.Printf("rewinder: restore %s done: %s", appID, msg)
+	progress("done", 100, msg)
 	return nil
 }
 
+func (s *Services) shouldTrack(appID, exePath, windowClass string) bool {
+	s.trackingMu.RLock()
+	on, paused := s.trackingOn, s.appPaused[appID]
+	s.trackingMu.RUnlock()
+	return on && !paused && s.cfg.Rules.Allow(exePath, windowClass)
+}
+
+type pendingCapture struct {
+	first, last time.Time
+}
+
+// captureLoop debounces window events per process: a burst of move events
+// (dragging a window) results in one capture of the final position.
 func (s *Services) captureLoop() {
+	defer close(s.loopDone)
+	pending := map[int]*pendingCapture{}
+	tick := time.NewTicker(100 * time.Millisecond)
+	defer tick.Stop()
+	save := time.NewTicker(saveInterval)
+	defer save.Stop()
+
 	for {
 		select {
 		case <-s.stopCh:
 			return
 		case ev := <-s.ev.Events():
-			s.handleSystemEvent(ev)
+			if ev.PID <= 0 || ev.PID == s.selfPID {
+				continue
+			}
+			now := time.Now()
+			if p := pending[ev.PID]; p != nil {
+				p.last = now
+			} else {
+				pending[ev.PID] = &pendingCapture{first: now, last: now}
+			}
+		case now := <-tick.C:
+			for pid, p := range pending {
+				if now.Sub(p.last) >= captureQuiet || now.Sub(p.first) >= captureMaxDelay {
+					delete(pending, pid)
+					s.captureProcess(pid)
+				}
+			}
+		case <-save.C:
+			if err := s.ss.Save(); err != nil {
+				log.Printf("rewinder: saving history: %v", err)
+			}
 		}
 	}
 }
 
-func (s *Services) shouldTrack(appID string, exePath string, windowClass string) bool {
+func (s *Services) captureAllVisible() {
+	pids := map[int]bool{}
+	for _, h := range winapi.TopLevelWindows() {
+		if winapi.IsAppWindow(h) {
+			pids[int(winapi.WindowPID(h))] = true
+		}
+	}
+	for pid := range pids {
+		if pid != s.selfPID {
+			s.captureProcess(pid)
+		}
+	}
+}
+
+func (s *Services) captureProcess(pid int) {
 	s.trackingMu.RLock()
 	on := s.trackingOn
-	paused := s.appPaused[appID]
 	s.trackingMu.RUnlock()
-	if !on || paused {
-		return false
-	}
-	s.cfgMu.RLock()
-	defer s.cfgMu.RUnlock()
-	return s.cfg.Rules.Allow(exePath, windowClass)
-}
-
-// Добавляем переменную для отслеживания времени последнего захвата
-var lastCaptureTime time.Time
-
-func (s *Services) handleSystemEvent(ev events.SystemEvent) {
-	switch ev.Type {
-	case events.EventForegroundChanged, events.EventWindowMoved, events.EventWindowShown, events.EventWindowHidden, events.EventProcessStarted, events.EventProcessExited:
-		s.captureForeground()
-	case events.EventClipboardChanged:
-		s.captureForeground()
-	default:
-	}
-}
-
-func (s *Services) captureForeground() {
-	// Ограничиваем частоту захватов, чтобы избежать избыточной нагрузки
-	now := time.Now()
-	if now.Sub(lastCaptureTime) < 500*time.Millisecond { // Минимальный интервал между захватами
+	if !on {
 		return
 	}
-	lastCaptureTime = now
-
-	app, err := s.cap.CaptureForeground()
+	app, err := s.cap.CaptureProcess(pid)
 	if err != nil {
-		return
-	}
-	if s.pl != nil {
-		s.pl.Capture(app)
+		return // process gone or no windows: keep the last good snapshot
 	}
 	if !s.shouldTrack(app.AppID, app.ExecutablePath, app.ForegroundWindowClass) {
 		return
 	}
+	s.pl.Capture(app)
 	meta, err := s.ss.Ingest(app)
-	if err != nil {
+	if err != nil || meta == nil {
 		return
 	}
-	if meta != nil {
-		s.deps.EmitEvent("onSnapshotCreated", ipcapi.SnapshotCreatedEvent{
-			AppID:      app.AppID,
-			Snapshot:   *meta,
-			OccurredAt: ipcapi.NowUTC(),
-		})
-	}
+	s.emit("onSnapshotCreated", ipcapi.SnapshotCreatedEvent{AppID: app.AppID, Snapshot: *meta, OccurredAt: ipcapi.NowUTC()})
 }

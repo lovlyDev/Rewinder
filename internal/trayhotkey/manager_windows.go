@@ -1,17 +1,19 @@
+//go:build windows
+
 package trayhotkey
 
 import (
 	_ "embed"
-	"os"
-	"path/filepath"
+	"errors"
+	"runtime"
 	"sync"
-	"time"
 	"unsafe"
 
 	"github.com/getlantern/systray"
 	"golang.org/x/sys/windows"
 )
 
+//go:embed icon.ico
 var trayIcon []byte
 
 type Dependencies struct {
@@ -21,71 +23,47 @@ type Dependencies struct {
 	OnOpenSettings   func()
 	OnExit           func()
 	OnOverlayHotkey  func()
+	OnHotkeyError    func(error)
 }
 
 type Manager struct {
-	deps Dependencies
-	once sync.Once
-	stop chan struct{}
-}
+	deps     Dependencies
+	once     sync.Once
+	stopOnce sync.Once
+	stop     chan struct{}
 
-func (m *Manager) setTrayIcon() {
-	if len(trayIcon) > 0 {
-		systray.SetIcon(trayIcon)
-		return
-	}
-
-	exePath, err := os.Executable()
-	if err != nil {
-		return
-	}
-
-	exeDir := filepath.Dir(exePath)
-	iconPaths := []string{
-		filepath.Join(exeDir, "icon.ico"),
-		filepath.Join(exeDir, "..", "icon.ico"),
-		filepath.Join(exeDir, "build", "windows", "icon.ico"),
-		filepath.Join(exeDir, "..", "build", "windows", "icon.ico"),
-	}
-
-	for _, iconPath := range iconPaths {
-		iconPath = filepath.Clean(iconPath)
-		if _, err := os.Stat(iconPath); err == nil {
-			iconData, err := os.ReadFile(iconPath)
-			if err != nil {
-				continue
-			}
-			systray.SetIcon(iconData)
-			return
-		}
-	}
+	hotkeyThread uint32
+	hotkeyReady  chan struct{}
 }
 
 func NewManager(deps Dependencies) *Manager {
-	return &Manager{deps: deps, stop: make(chan struct{})}
+	return &Manager{deps: deps, stop: make(chan struct{}), hotkeyReady: make(chan struct{})}
 }
 
 func (m *Manager) Start() {
 	m.once.Do(func() {
-		go systray.Run(m.onReady, m.onExit)
+		go func() {
+			// systray owns a window and a message loop; keep it on one OS thread.
+			runtime.LockOSThread()
+			systray.Run(m.onReady, func() {})
+		}()
 		go m.hotkeyLoop()
 	})
 }
 
 func (m *Manager) Stop() {
-	select {
-	case <-m.stop:
-	default:
+	m.stopOnce.Do(func() {
 		close(m.stop)
-	}
-	systray.Quit()
+		<-m.hotkeyReady
+		_, _, _ = procPostThreadMessageW.Call(uintptr(m.hotkeyThread), wmQuit, 0, 0)
+		systray.Quit()
+	})
 }
 
 func (m *Manager) onReady() {
+	systray.SetIcon(trayIcon)
 	systray.SetTitle("Rewinder")
-	systray.SetTooltip("App Time Machine")
-
-	m.setTrayIcon()
+	systray.SetTooltip("Rewinder: Ctrl+Alt+Z to restore")
 
 	itemOpen := systray.AddMenuItem("Open Timeline", "Open timeline window")
 	itemPause := systray.AddMenuItem("Pause Tracking", "Pause tracking")
@@ -100,79 +78,83 @@ func (m *Manager) onReady() {
 			case <-m.stop:
 				return
 			case <-itemOpen.ClickedCh:
-				if m.deps.OnOpenTimeline != nil {
-					m.deps.OnOpenTimeline()
-				}
+				call(m.deps.OnOpenTimeline)
 			case <-itemPause.ClickedCh:
-				if m.deps.OnPauseTracking != nil {
-					m.deps.OnPauseTracking()
-				}
+				call(m.deps.OnPauseTracking)
 			case <-itemResume.ClickedCh:
-				if m.deps.OnResumeTracking != nil {
-					m.deps.OnResumeTracking()
-				}
+				call(m.deps.OnResumeTracking)
 			case <-itemSettings.ClickedCh:
-				if m.deps.OnOpenSettings != nil {
-					m.deps.OnOpenSettings()
-				}
+				call(m.deps.OnOpenSettings)
 			case <-itemExit.ClickedCh:
-				if m.deps.OnExit != nil {
-					m.deps.OnExit()
-				}
-				m.Stop()
+				call(m.deps.OnExit)
 				return
 			}
 		}
 	}()
 }
 
-func (m *Manager) onExit() {}
-
-func (m *Manager) hotkeyLoop() {
-	const (
-		MOD_ALT     = 0x0001
-		MOD_CONTROL = 0x0002
-		WM_HOTKEY   = 0x0312
-	)
-	user32 := windows.NewLazySystemDLL("user32.dll")
-	procRegisterHotKey := user32.NewProc("RegisterHotKey")
-	procUnregisterHotKey := user32.NewProc("UnregisterHotKey")
-	procGetMessageW := user32.NewProc("GetMessageW")
-
-	const hotkeyID = 0xA11
-	_, _, _ = procRegisterHotKey.Call(0, hotkeyID, MOD_CONTROL|MOD_ALT, 0x5A)
-	defer procUnregisterHotKey.Call(0, hotkeyID)
-
-	var msg MSG
-	for {
-		select {
-		case <-m.stop:
-			return
-		default:
-			r1, _, _ := procGetMessageW.Call(uintptr(unsafe.Pointer(&msg)), 0, 0, 0)
-			if int32(r1) <= 0 {
-				time.Sleep(50 * time.Millisecond)
-				continue
-			}
-			if msg.Message == WM_HOTKEY && msg.WParam == hotkeyID {
-				if m.deps.OnOverlayHotkey != nil {
-					m.deps.OnOverlayHotkey()
-				}
-			}
-		}
+func call(f func()) {
+	if f != nil {
+		f()
 	}
 }
 
-type POINT struct {
-	X int32
-	Y int32
-}
+const (
+	modAlt      = 0x0001
+	modControl  = 0x0002
+	modNoRepeat = 0x4000
+	vkZ         = 0x5A
+	wmHotkey    = 0x0312
+	wmQuit      = 0x0012
+	hotkeyID    = 0xA11
+)
 
-type MSG struct {
+var (
+	user32                 = windows.NewLazySystemDLL("user32.dll")
+	procRegisterHotKey     = user32.NewProc("RegisterHotKey")
+	procUnregisterHotKey   = user32.NewProc("UnregisterHotKey")
+	procGetMessageW        = user32.NewProc("GetMessageW")
+	procPostThreadMessageW = user32.NewProc("PostThreadMessageW")
+)
+
+type msg struct {
 	HWnd    uintptr
 	Message uint32
 	WParam  uintptr
 	LParam  uintptr
 	Time    uint32
-	Pt      POINT
+	PtX     int32
+	PtY     int32
+}
+
+// ErrHotkeyTaken is reported when another program already owns Ctrl+Alt+Z.
+var ErrHotkeyTaken = errors.New("Ctrl+Alt+Z is already used by another program")
+
+// hotkeyLoop registers the hotkey and pumps messages on the same locked thread:
+// RegisterHotKey(NULL, ...) posts WM_HOTKEY to the registering thread's queue.
+func (m *Manager) hotkeyLoop() {
+	runtime.LockOSThread()
+	defer runtime.UnlockOSThread()
+
+	m.hotkeyThread = windows.GetCurrentThreadId()
+	r, _, _ := procRegisterHotKey.Call(0, hotkeyID, modControl|modAlt|modNoRepeat, vkZ)
+	close(m.hotkeyReady)
+	if r == 0 {
+		if m.deps.OnHotkeyError != nil {
+			m.deps.OnHotkeyError(ErrHotkeyTaken)
+		}
+	} else {
+		defer procUnregisterHotKey.Call(0, hotkeyID)
+	}
+
+	var mm msg
+	for {
+		r, _, _ := procGetMessageW.Call(uintptr(unsafe.Pointer(&mm)), 0, 0, 0)
+		if int32(r) <= 0 {
+			return
+		}
+		if mm.Message == wmHotkey && mm.WParam == hotkeyID {
+			call(m.deps.OnOverlayHotkey)
+		}
+	}
 }

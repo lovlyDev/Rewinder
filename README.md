@@ -1,63 +1,79 @@
-# <img src="internal/public/icon.ico" width="32"> Rewinder — App Time Machine for Windows
+# <img src="internal/public/icon.ico" width="32"> Rewinder — Time Machine for Windows windows
 
-**Automatic tracking and recovery of Windows application states**
+**Remembers where and how your windows were, and puts them back with one key.**
 
-## 🚀 Features
+[Русская версия](README-RU.md)
 
-- **Automatic snapshots** - tracks window, file, and clipboard changes
-- **Quick restoration** - restores application states with one click
-- **Hotkeys** - `Ctrl + Alt + Z` for quick access to recovery
-- **System tray** - runs in the background without interfering with work
-- **Smart notifications** - compact notifications in the corner of the screen
+## What it does
 
-## 📥 Installation
+- **Undo for your window layout.** Every move, maximize or minimize goes into a history. `Ctrl + Alt + Z` opens an overlay with one step back already selected for the app you were in. `Enter` puts the windows back.
+- **Relaunches closed apps.** If an app is closed, Rewinder starts it with the same arguments and puts its windows where they were. Store/MSIX apps are started by their AppUserModelID.
+- **Knows a few apps better:**
+  - **File Explorer**: remembers which folders were open and reopens the missing ones.
+  - **Word, Excel, PowerPoint**: remember open documents and reopen them.
+  - **Chrome, Edge, Brave, Vivaldi, Opera**: relaunch with the same profile and `--restore-last-session`.
+- **History survives a reboot**: 7 days, up to 500 snapshots per app.
+- **No administrator rights needed.**
 
-1. **Download** `Rewinder.exe` from [releases](../../releases)
-2. **Run as administrator** (required for system monitoring)
-3. **Use** `Ctrl + Alt + Z` to restore states
-4. **Configure** through the system tray icon
+## What it does not do
 
-## 🎮 Usage
+Rewinder restores **windows**, not their **content**: unsaved text, the exact browser tabs at snapshot time, or scroll positions cannot be brought back. Browser tabs are restored by the browser itself.
 
-### Main functions:
-- **Timeline** - view all snapshots by applications
-- **Quick Restore** - quick restoration via `Ctrl + Alt + Z`
-- **Tray Menu** - control through system tray
+## Install
 
-### Hotkeys:
-- `Ctrl + Alt + Z` - open restoration overlay
-- `←/→` or scroll - navigate through snapshots
-- `Enter` - restore selected snapshot
-- `Esc` - close overlay
+1. Download `Rewinder.exe` from [releases](../../releases).
+2. Run it. Rewinder lives in the system tray.
+3. Turn on autostart in Settings if you like (it then starts hidden).
 
-## ⚙️ System Requirements
+## Keys
 
-- **Windows 10/11** (64-bit)
-- **Administrator rights** (for monitoring system events)
-- **WebView2** (usually already installed in Windows)
+| Key | Action |
+|---|---|
+| `Ctrl + Alt + Z` | open the overlay for the current app |
+| `←` / `→` or mouse wheel | step through history |
+| `Enter` | restore the selected snapshot |
+| `Esc` | close the overlay |
 
-## 🔧 Technical Details
+The main window (Timeline) lists every app in the history, including closed ones, and can restore any of them.
 
-- **Backend**: Go with Windows system APIs
-- **Frontend**: Svelte + TypeScript
-- **Framework**: Wails v2
-- **Architecture**: Event-driven with delta-based snapshots
+## Privacy
 
-## 🛡️ Privacy
+- Only window layout and titles, open folder and Office document paths, and the launch command line are stored.
+- The clipboard is never read.
+- Password managers (KeePass, KeePassXC, 1Password, Bitwarden) are never tracked.
+- Everything stays in `%LOCALAPPDATA%\Rewinder\history` and is never sent anywhere.
 
-- Stores only **hashes** of clipboard content (not the actual text)
-- All data remains **locally** on your computer
-- Does not send data to the internet
+## Build
 
-## 📝 License
+Requires Go 1.23+, Node.js and the [Wails CLI](https://wails.io) v2.11.
 
-MIT License - free use and modification
+```bash
+go install github.com/wailsapp/wails/v2/cmd/wails@v2.11.0
+wails build
+```
 
-## 🐛 Report a Bug
+The Wails 2.11 bindings generator does not work with Go 1.25 or newer. With a recent Go, build with `GOTOOLCHAIN=go1.24.0 wails build`.
 
-If you found a bug or have suggestions - create an [Issue](../../issues)
+## Tests
+
+```bash
+go test ./...
+```
+
+Integration tests open real windows on the desktop, move, close and restore them:
+
+```bash
+go test -tags integration ./...
+```
+
+## Troubleshooting
+
+The log is at `%LOCALAPPDATA%\Rewinder\rewinder.log`. Please attach it to an [issue](../../issues).
+
+## License
+
+MIT
 
 ---
 
-**Author**: lovly 
-**Version**: 0.1.0
+**Author**: lovly · **Version**: 0.2.0

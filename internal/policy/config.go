@@ -8,25 +8,22 @@ import (
 )
 
 type Config struct {
-	Retention      time.Duration
-	StorageDir     string
-	ResourceLimits ResourceLimits
-	Rules          Rules
-}
-
-type ResourceLimits struct {
-	MaxRAMBytes        int64
-	MaxDiskBytes       int64
+	Retention          time.Duration
+	StorageDir         string
 	MaxSnapshotsPerApp int
+	Rules              Rules
 }
 
 type Rules struct {
-	ExcludeExeNames  []string
-	ExcludePathSubstr []string
+	ExcludeExeNames      []string
+	ExcludePathSubstr    []string
 	ExcludeWindowClasses []string
 }
 
 func (r Rules) Allow(exePath string, windowClass string) bool {
+	if exePath == "" {
+		return false
+	}
 	exeLower := strings.ToLower(filepath.Base(exePath))
 	pathLower := strings.ToLower(exePath)
 	classLower := strings.ToLower(windowClass)
@@ -37,50 +34,57 @@ func (r Rules) Allow(exePath string, windowClass string) bool {
 		}
 	}
 	for _, s := range r.ExcludePathSubstr {
-		if s == "" {
-			continue
-		}
-		if strings.Contains(pathLower, strings.ToLower(s)) {
+		if s != "" && strings.Contains(pathLower, strings.ToLower(s)) {
 			return false
 		}
 	}
 	for _, c := range r.ExcludeWindowClasses {
-		if c == "" {
-			continue
-		}
-		if classLower == strings.ToLower(c) {
+		if c != "" && classLower == strings.ToLower(c) {
 			return false
 		}
 	}
 	return true
 }
 
+// Shell and system processes whose windows are not user apps, or that host other
+// apps' windows (ApplicationFrameHost owns UWP frames, so relaunching it is useless).
+var systemExes = []string{
+	"applicationframehost.exe",
+	"searchhost.exe",
+	"searchapp.exe",
+	"startmenuexperiencehost.exe",
+	"shellexperiencehost.exe",
+	"shellhost.exe",
+	"textinputhost.exe",
+	"lockapp.exe",
+	"systemsettings.exe",
+	"taskmgr.exe",
+	"rewinder.exe",
+	// password managers: never keep a record of their windows
+	"keepass.exe",
+	"keepassxc.exe",
+	"1password.exe",
+	"bitwarden.exe",
+}
+
 func DefaultConfig() *Config {
-	base := defaultStorageDir()
 	return &Config{
-		Retention: 24 * time.Hour,
-		StorageDir: base,
-		ResourceLimits: ResourceLimits{
-			MaxRAMBytes:        256 * 1024 * 1024,   // 256MB in-memory target
-			MaxDiskBytes:       2 * 1024 * 1024 * 1024, // 2GB spillover
-			MaxSnapshotsPerApp: 500,
-		},
+		Retention:          7 * 24 * time.Hour,
+		StorageDir:         defaultStorageDir(),
+		MaxSnapshotsPerApp: 500,
 		Rules: Rules{
-			ExcludeExeNames:       []string{"keepass.exe"},
-			ExcludePathSubstr:     []string{`\\AppData\\Local\\Temp\\`},
-			ExcludeWindowClasses:  []string{},
+			ExcludeExeNames:   append([]string(nil), systemExes...),
+			ExcludePathSubstr: []string{`\AppData\Local\Temp\`},
 		},
 	}
 }
 
 func defaultStorageDir() string {
-	// %LOCALAPPDATA%\Rewinder2\Snapshots
 	if v := os.Getenv("LOCALAPPDATA"); v != "" {
-		return filepath.Join(v, "Rewinder2", "Snapshots")
+		return filepath.Join(v, "Rewinder", "history")
 	}
 	if v := os.Getenv("APPDATA"); v != "" {
-		return filepath.Join(v, "Rewinder2", "Snapshots")
+		return filepath.Join(v, "Rewinder", "history")
 	}
-	return filepath.Join(".", "snapshots")
+	return filepath.Join(".", "history")
 }
-

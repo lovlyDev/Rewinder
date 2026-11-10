@@ -3,7 +3,6 @@ module Rewinder
 go 1.23
 
 require (
-	github.com/StackExchange/wmi v1.2.1
 	github.com/getlantern/systray v1.2.2
 	github.com/go-ole/go-ole v1.3.0
 	github.com/google/uuid v1.6.0

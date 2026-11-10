@@ -1,97 +1,32 @@
+//go:build windows
+
 package events
 
 import (
+	"runtime"
 	"time"
 	"unsafe"
 
 	"golang.org/x/sys/windows"
 )
 
-type winEventHook struct {
-	emit func(SystemEvent)
-
-	hHook windows.Handle
-	cb    uintptr
-}
-
-func newWinEventHook(emit func(SystemEvent)) (*winEventHook, error) {
-	w := &winEventHook{emit: emit}
-	w.cb = windows.NewCallback(w.callback)
-
-	h, err := setWinEventHook(
-		EVENT_SYSTEM_FOREGROUND,
-		EVENT_OBJECT_LOCATIONCHANGE,
-		0,
-		w.cb,
-		0,
-		0,
-		WINEVENT_OUTOFCONTEXT|WINEVENT_SKIPOWNPROCESS,
-	)
-	if err != nil {
-		return nil, err
-	}
-	w.hHook = h
-	return w, nil
-}
-
-func (w *winEventHook) Run(stopCh <-chan struct{}) {
-	var msg MSG
-	for {
-		select {
-		case <-stopCh:
-			if w.hHook != 0 {
-				_ = unhookWinEvent(w.hHook)
-			}
-			return
-		default:
-			ret, _ := peekMessage(&msg, 0, 0, 0, PM_REMOVE)
-			if ret {
-				translateMessage(&msg)
-				dispatchMessage(&msg)
-			} else {
-				// Увеличиваем задержку для снижения нагрузки на CPU
-				time.Sleep(50 * time.Millisecond)
-			}
-		}
-	}
-}
-
-func (w *winEventHook) callback(hWinEventHook windows.Handle, event uint32, hwnd uintptr, idObject int32, idChild int32, dwEventThread uint32, dwmsEventTime uint32) uintptr {
-	_ = hWinEventHook
-	_ = idChild
-	_ = dwEventThread
-
-	if idObject != OBJID_WINDOW {
-		return 0
-	}
-
-	ts := time.Now().UTC().UnixMilli()
-	pid := int(getWindowPID(hwnd))
-	switch event {
-	case EVENT_SYSTEM_FOREGROUND:
-		w.emit(SystemEvent{Type: EventForegroundChanged, Timestamp: ts, PID: pid, HWND: hwnd})
-	case EVENT_OBJECT_LOCATIONCHANGE:
-		w.emit(SystemEvent{Type: EventWindowMoved, Timestamp: ts, PID: pid, HWND: hwnd})
-	case EVENT_OBJECT_DESTROY:
-		w.emit(SystemEvent{Type: EventWindowDestroyed, Timestamp: ts, PID: pid, HWND: hwnd})
-	case EVENT_OBJECT_SHOW:
-		w.emit(SystemEvent{Type: EventWindowShown, Timestamp: ts, PID: pid, HWND: hwnd})
-	case EVENT_OBJECT_HIDE:
-		w.emit(SystemEvent{Type: EventWindowHidden, Timestamp: ts, PID: pid, HWND: hwnd})
-	}
-	return 0
-}
-
 const (
-	EVENT_SYSTEM_FOREGROUND     = 0x0003
-	EVENT_OBJECT_SHOW           = 0x8002
-	EVENT_OBJECT_HIDE           = 0x8003
-	EVENT_OBJECT_DESTROY        = 0x8001
-	EVENT_OBJECT_LOCATIONCHANGE = 0x800B
-	OBJID_WINDOW                = 0
-	WINEVENT_OUTOFCONTEXT       = 0x0000
-	WINEVENT_SKIPOWNPROCESS     = 0x0002
-	PM_REMOVE                   = 0x0001
+	eventSystemForeground     = 0x0003
+	eventSystemMoveSizeEnd    = 0x000B
+	eventSystemMinimizeStart  = 0x0016
+	eventSystemMinimizeEnd    = 0x0017
+	eventObjectShow           = 0x8002
+	eventObjectHide           = 0x8003
+	eventObjectLocationChange = 0x800B
+	eventObjectCloaked        = 0x8017
+	eventObjectUncloaked      = 0x8018 // windows become visible this way after their open animation
+
+	objidWindow            = 0
+	childidSelf            = 0
+	wineventOutOfContext   = 0x0000
+	wineventSkipOwnProcess = 0x0002
+	wmQuit                 = 0x0012
+	gaRoot                 = 2
 )
 
 var (
@@ -99,59 +34,104 @@ var (
 	procSetWinEventHook    = user32.NewProc("SetWinEventHook")
 	procUnhookWinEvent     = user32.NewProc("UnhookWinEvent")
 	procGetWindowThreadPID = user32.NewProc("GetWindowThreadProcessId")
-	procPeekMessageW       = user32.NewProc("PeekMessageW")
+	procGetAncestor        = user32.NewProc("GetAncestor")
+	procGetMessageW        = user32.NewProc("GetMessageW")
 	procTranslateMessage   = user32.NewProc("TranslateMessage")
 	procDispatchMessageW   = user32.NewProc("DispatchMessageW")
+	procPostThreadMessageW = user32.NewProc("PostThreadMessageW")
 )
 
-func setWinEventHook(eventMin, eventMax uint32, hmodWinEventHook windows.Handle, pfnWinEventProc uintptr, idProcess, idThread uint32, dwFlags uint32) (windows.Handle, error) {
-	r1, _, e1 := procSetWinEventHook.Call(
-		uintptr(eventMin),
-		uintptr(eventMax),
-		uintptr(hmodWinEventHook),
-		pfnWinEventProc,
-		uintptr(idProcess),
-		uintptr(idThread),
-		uintptr(dwFlags),
-	)
-	if r1 == 0 {
-		return 0, e1
-	}
-	return windows.Handle(r1), nil
+type msg struct {
+	HWnd    uintptr
+	Message uint32
+	WParam  uintptr
+	LParam  uintptr
+	Time    uint32
+	PtX     int32
+	PtY     int32
 }
 
-func unhookWinEvent(h windows.Handle) error {
-	r1, _, e1 := procUnhookWinEvent.Call(uintptr(h))
-	if r1 == 0 {
-		return e1
-	}
-	return nil
+// winEventHook delivers top-level window events. Out-of-context WinEvent hooks
+// are delivered through the message queue of the thread that installed them,
+// so install and pump must happen on one locked OS thread.
+type winEventHook struct {
+	emit     func(SystemEvent)
+	threadID uint32
+	ready    chan struct{}
 }
 
-func getWindowPID(hwnd uintptr) uint32 {
+var hookCallback uintptr
+
+func (w *winEventHook) callback(_ windows.Handle, event uint32, hwnd uintptr, idObject int32, idChild int32, _ uint32, _ uint32) uintptr {
+	if idObject != objidWindow || idChild != childidSelf || hwnd == 0 {
+		return 0
+	}
+	if root, _, _ := procGetAncestor.Call(hwnd, gaRoot); root != hwnd {
+		return 0
+	}
+	var t EventType
+	switch event {
+	case eventSystemForeground:
+		t = EventForegroundChanged
+	case eventSystemMoveSizeEnd, eventObjectLocationChange, eventSystemMinimizeStart, eventSystemMinimizeEnd:
+		t = EventWindowMoved
+	case eventObjectShow, eventObjectUncloaked:
+		t = EventWindowShown
+	case eventObjectHide, eventObjectCloaked:
+		t = EventWindowHidden
+	default:
+		return 0
+	}
 	var pid uint32
 	_, _, _ = procGetWindowThreadPID.Call(hwnd, uintptr(unsafe.Pointer(&pid)))
-	return pid
+	w.emit(SystemEvent{Type: t, Timestamp: time.Now().UTC().UnixMilli(), PID: int(pid), HWND: hwnd})
+	return 0
 }
 
-func peekMessage(msg *MSG, hwnd uintptr, msgFilterMin, msgFilterMax uint32, removeMsg uint32) (bool, error) {
-	r1, _, e1 := procPeekMessageW.Call(
-		uintptr(unsafe.Pointer(msg)),
-		hwnd,
-		uintptr(msgFilterMin),
-		uintptr(msgFilterMax),
-		uintptr(removeMsg),
-	)
-	if r1 == 0 {
-		return false, nil
+// run blocks until stop is called. It must be started in its own goroutine.
+func (w *winEventHook) run() {
+	runtime.LockOSThread()
+	defer runtime.UnlockOSThread()
+
+	w.threadID = windows.GetCurrentThreadId()
+	if hookCallback == 0 {
+		hookCallback = windows.NewCallback(w.callback)
 	}
-	return true, e1
+	ranges := [][2]uint32{
+		{eventSystemForeground, eventSystemForeground},
+		{eventSystemMoveSizeEnd, eventSystemMoveSizeEnd},
+		{eventSystemMinimizeStart, eventSystemMinimizeEnd},
+		{eventObjectShow, eventObjectHide},
+		{eventObjectLocationChange, eventObjectLocationChange},
+		{eventObjectCloaked, eventObjectUncloaked},
+	}
+	var hooks []uintptr
+	for _, r := range ranges {
+		h, _, _ := procSetWinEventHook.Call(uintptr(r[0]), uintptr(r[1]), 0, hookCallback, 0, 0,
+			wineventOutOfContext|wineventSkipOwnProcess)
+		if h != 0 {
+			hooks = append(hooks, h)
+		}
+	}
+	close(w.ready)
+	defer func() {
+		for _, h := range hooks {
+			_, _, _ = procUnhookWinEvent.Call(h)
+		}
+	}()
+
+	var m msg
+	for {
+		r, _, _ := procGetMessageW.Call(uintptr(unsafe.Pointer(&m)), 0, 0, 0)
+		if int32(r) <= 0 { // WM_QUIT or error
+			return
+		}
+		_, _, _ = procTranslateMessage.Call(uintptr(unsafe.Pointer(&m)))
+		_, _, _ = procDispatchMessageW.Call(uintptr(unsafe.Pointer(&m)))
+	}
 }
 
-func translateMessage(msg *MSG) {
-	_, _, _ = procTranslateMessage.Call(uintptr(unsafe.Pointer(msg)))
-}
-
-func dispatchMessage(msg *MSG) {
-	_, _, _ = procDispatchMessageW.Call(uintptr(unsafe.Pointer(msg)))
+func (w *winEventHook) stop() {
+	<-w.ready
+	_, _, _ = procPostThreadMessageW.Call(uintptr(w.threadID), wmQuit, 0, 0)
 }

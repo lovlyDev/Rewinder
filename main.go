@@ -3,6 +3,9 @@ package main
 import (
 	"context"
 	"embed"
+	"os"
+
+	"Rewinder/internal/services"
 
 	"github.com/wailsapp/wails/v2"
 	"github.com/wailsapp/wails/v2/pkg/options"
@@ -13,13 +16,14 @@ import (
 var assets embed.FS
 
 func main() {
+	services.SetupLogFile()
 	app := NewApp()
 
 	err := wails.Run(&options.App{
 		Title:             "Rewinder",
 		Width:             1024,
 		Height:            768,
-		StartHidden:       false,
+		StartHidden:       services.StartedByAutostart(os.Args[1:]),
 		HideWindowOnClose: true,
 		AssetServer: &assetserver.Options{
 			Assets: assets,
@@ -29,6 +33,12 @@ func main() {
 		OnShutdown:       app.shutdown,
 		OnBeforeClose: func(ctx context.Context) (prevent bool) {
 			return false
+		},
+		SingleInstanceLock: &options.SingleInstanceLock{
+			UniqueId: "rewinder-7c1f3f2e-app-time-machine",
+			OnSecondInstanceLaunch: func(options.SecondInstanceData) {
+				app.onSecondInstance()
+			},
 		},
 		Bind: []interface{}{
 			app,
