@@ -43,6 +43,7 @@ func (a *App) saveSettingsLocked(s settings.Settings) error {
 		}
 	}
 	if err := settings.Save(settings.Directory(), s); err != nil {
+		log.Printf("rewinder: saving settings: %v", err)
 		if s.Hotkey != old.Hotkey {
 			if rollback := a.svc.SetHotkey(old.Hotkey); rollback != nil {
 				log.Printf("hotkey rollback: %v", rollback)

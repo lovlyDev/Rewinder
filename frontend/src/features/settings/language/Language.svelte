@@ -1,9 +1,22 @@
 <script lang="ts">
- import { createEventDispatcher } from 'svelte';
- import type { settings } from '../../../../wailsjs/go/models';
- import { t } from '../../../i18n';
- import '../settings.css';
- export let value: settings.Settings;
- const dispatch=createEventDispatcher<{change:void}>();
+  import { t } from '../../../i18n';
+  import type { Settings } from '../../../lib/preferences';
+  import Select from '../../../ui/select/Select.svelte';
+  import SettingRow from '../SettingRow.svelte';
+
+  type Props = { draft: Settings; save: () => void };
+  let { draft, save }: Props = $props();
 </script>
-<div class="settings-section"><h2>{$t('language')}</h2><label class="field"><span>{$t('language')}</span><select bind:value={value.language} on:change={()=>dispatch('change')}><option value="system">{$t('system')}</option><option value="ru">Русский</option><option value="en">English</option></select></label></div>
+
+<SettingRow label={$t('language')} hint={$t('languageHint')}>
+  <Select
+    label={$t('language')}
+    bind:value={draft.language}
+    onchange={save}
+    options={[
+      { value: 'system', label: $t('system'), hint: $t('systemHint') },
+      { value: 'ru', label: 'Русский' },
+      { value: 'en', label: 'English' },
+    ]}
+  />
+</SettingRow>

@@ -1,8 +1,49 @@
+/* Design tokens. theme.ts overrides the user-tunable ones (accent, radius,
+   density, motion, background) on :root at runtime. */
 :root {
- --bg: #0a0a0c; --surface: #111114; --raised: #19191d; --hover: #222227;
- --text: #f1f0f6; --muted: #a4a3b1; --accent: #a99bff; --accent-ink: #101014;
- --accent-soft: #a99bff18; --radius: 14px; --small-radius: calc(var(--radius) * .6);
- --space: 16px; --row: 66px; --duration: 180ms; --quick: 140ms;
- --ease: cubic-bezier(.2,.8,.2,1); --danger: #ff929e; --ok: #85dbb1;
- --scrim: #000a; --background-image: none;
+  color-scheme: dark;
+
+  /* surfaces: depth comes from lightness, never from borders */
+  --bg: #070709; /* user setting: the window background colour */
+  --sunken: #09090c; /* fixed: insets inside panels, never follows --bg */
+  --surface: #0e0e11;
+  --raised: #16161b;
+  --overlay: #1c1c22;
+  --hover: #ffffff0b;
+  --press: #ffffff14;
+  --line: #ffffff0d;
+  --scrim: #000000b3;
+  --background-image: none;
+
+  /* text */
+  --text: #f3f2f8;
+  --muted: #a09fad;
+  --faint: #6b6a77;
+
+  /* accent (user setting) and states */
+  --accent: #a99bff;
+  --accent-soft: #a99bff1f;
+  --accent-glow: #a99bff40;
+  --accent-ink: #0d0b16;
+  --ok: #7ee2b0;
+  --warn: #ffcf7a;
+  --danger: #ff8f9c;
+
+  /* shape (user setting) */
+  --radius: 14px;
+  --r-lg: calc(var(--radius) + 6px);
+  --r-sm: calc(var(--radius) * 0.72);
+  --r-xs: calc(var(--radius) * 0.5);
+
+  /* density (user setting) */
+  --space: 16px;
+  --row: 60px;
+
+  /* motion (user setting): short, decelerating, transform/opacity only */
+  --ease: cubic-bezier(0.16, 1, 0.3, 1);
+  --ease-in: cubic-bezier(0.7, 0, 0.84, 0);
+  --quick: 140ms;
+  --duration: 220ms;
+
+  --font: "Inter Variable", "Segoe UI Variable Text", "Segoe UI", system-ui, sans-serif;
 }

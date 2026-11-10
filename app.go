@@ -6,6 +6,7 @@ import (
 	"log"
 	"os"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"Rewinder/internal/ipcapi"
@@ -22,6 +23,10 @@ type App struct {
 	start       sync.Once
 	settingsMu  sync.Mutex
 	preferences settings.Settings
+	startHidden bool        // launched by autostart, window not shown
+	hiddenOnce  atomic.Bool // the window has been hidden or minimised at least once
+	// overlayFromWindow: the overlay was opened from the main window, so closing it returns there
+	overlayFromWindow atomic.Bool
 	windowMu    sync.Mutex
 	overlay     bool
 	previous    struct {
@@ -55,23 +60,7 @@ func (a *App) startup(ctx context.Context) {
 					a.ExitApp()
 				}
 			},
-			OnOverlayRequested: func(appID string) {
-				// Show last: Wails' show path is what moves keyboard focus into the
-				// WebView, and changing window styles afterwards can lose it again.
-				runtime.EventsEmit(ctx, "onOverlayOpenRequested", OverlayRequest{AppID: appID})
-				a.prepareOverlay()
-				runtime.EventsEmit(ctx, "onWindowVisibilityChanged", true)
-				runtime.WindowShow(ctx)
-				// Windows often refuses Wails' own SetForegroundWindow (focus-stealing
-				// guard); then the overlay is visible but keys still go to the other app.
-				if !winapi.WaitAndForceForeground(uint32(os.Getpid()), time.Second) {
-					log.Printf("rewinder: could not bring the overlay to the foreground")
-					return
-				}
-				// Now that the window is active, show again: Wails' SetFocus is what hands
-				// keyboard focus to the WebView, and it only works for the active window.
-				runtime.WindowShow(ctx)
-			},
+			OnOverlayRequested: a.OpenOverlay,
 			ShowTimelineWindow: a.ShowTimelineWindow,
 		})
 		a.svc.Start(ctx)
@@ -144,6 +133,11 @@ func (a *App) HideOverlay() {
 	if a.ctx == nil {
 		return
 	}
+	if a.overlayFromWindow.Swap(false) {
+		a.ShowTimelineWindow()
+		return
+	}
+	a.hiddenOnce.Store(true)
 	runtime.EventsEmit(a.ctx, "onWindowVisibilityChanged", false)
 	runtime.WindowHide(a.ctx)
 	a.restoreGeometry()
@@ -223,17 +217,66 @@ func (a *App) preferenceLanguage() string {
 	}
 	return lang
 }
+// OpenOverlay turns the window into the compact quick-restore overlay for appID.
+// The hotkey calls it, and so does the "Quick restore" button in the main window.
+func (a *App) OpenOverlay(appID string) {
+	if a.ctx == nil {
+		return
+	}
+	// Show last: Wails' show path is what moves keyboard focus into the
+	// WebView, and changing window styles afterwards can lose it again.
+	// Opened from the main window: closing the overlay goes back there. Opened by
+	// the hotkey from another app: closing just hides Rewinder again.
+	a.overlayFromWindow.Store(a.GetWindowVisible())
+	runtime.EventsEmit(a.ctx, "onOverlayOpenRequested", OverlayRequest{AppID: appID})
+	a.prepareOverlay()
+	runtime.EventsEmit(a.ctx, "onWindowVisibilityChanged", true)
+	runtime.WindowShow(a.ctx)
+	// Windows often refuses Wails' own SetForegroundWindow (focus-stealing
+	// guard); then the overlay is visible but keys still go to the other app.
+	if !winapi.WaitAndForceForeground(uint32(os.Getpid()), time.Second) {
+		log.Printf("rewinder: could not bring the overlay to the foreground")
+		return
+	}
+	// Now that the window is active, show again: Wails' SetFocus is what hands
+	// keyboard focus to the WebView, and it only works for the active window.
+	runtime.WindowShow(a.ctx)
+	winapi.FocusContent(winapi.VisibleWindowOf(uint32(os.Getpid())))
+}
+
+// FocusOverlay is called by the overlay once it is rendered. The UI is not drawn
+// while the window is hidden, so the focus handed over when the window was shown
+// can land before the overlay exists; activating again here makes keys reliable.
+func (a *App) FocusOverlay() {
+	if a.ctx == nil {
+		return
+	}
+	if !winapi.WaitAndForceForeground(uint32(os.Getpid()), 500*time.Millisecond) {
+		log.Printf("rewinder: overlay could not take the foreground")
+		return
+	}
+	runtime.WindowShow(a.ctx)
+	winapi.FocusContent(winapi.VisibleWindowOf(uint32(os.Getpid())))
+}
+
 func (a *App) MinimiseWindow() {
+	a.hiddenOnce.Store(true)
 	runtime.EventsEmit(a.ctx, "onWindowVisibilityChanged", false)
 	runtime.WindowMinimise(a.ctx)
 }
 func (a *App) HideWindow() {
+	a.hiddenOnce.Store(true)
 	runtime.EventsEmit(a.ctx, "onWindowVisibilityChanged", false)
 	runtime.WindowHide(a.ctx)
 }
 
 func (a *App) GetWindowVisible() bool {
-	return winapi.OwnWindowVisible() && !runtime.WindowIsMinimised(a.ctx)
+	if winapi.OwnWindowVisible() {
+		return !runtime.WindowIsMinimised(a.ctx)
+	}
+	// The UI asks this while starting up, before Wails has shown the window. A
+	// normal launch is about to become visible; only an autostart launch stays hidden.
+	return !a.startHidden && !a.hiddenOnce.Load()
 }
 
 func (a *App) GetAppSummary(appID string) (*ipcapi.AppSummary, error) {

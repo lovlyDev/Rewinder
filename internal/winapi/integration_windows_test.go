@@ -3,6 +3,8 @@
 package winapi
 
 import (
+	"bytes"
+	"image/png"
 	"net"
 	"os"
 	"path/filepath"
@@ -69,6 +71,31 @@ func TestIsElevatedMatchesOwnToken(t *testing.T) {
 	}
 }
 
+func TestAppIconPNGOfExplorer(t *testing.T) {
+	data, err := AppIconPNG(filepath.Join(os.Getenv("WINDIR"), "explorer.exe"), 64)
+	if err != nil {
+		t.Fatal(err)
+	}
+	img, err := png.Decode(bytes.NewReader(data))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if b := img.Bounds(); b.Dx() != 64 || b.Dy() != 64 {
+		t.Fatalf("size %v", b)
+	}
+	visible := 0
+	for y := 0; y < 64; y++ {
+		for x := 0; x < 64; x++ {
+			if _, _, _, a := img.At(x, y).RGBA(); a > 0 {
+				visible++
+			}
+		}
+	}
+	if visible < 200 || visible == 64*64 {
+		t.Fatalf("icon looks wrong: %d of %d pixels visible", visible, 64*64)
+	}
+}
+
 func TestEnumWindowsManyTimes(t *testing.T) {
 	// windows.NewCallback has a fixed limit; the old code created one per call
 	// and would panic after a few thousand captures.
@@ -79,7 +106,6 @@ func TestEnumWindowsManyTimes(t *testing.T) {
 	}
 }
 
-var procPostMessageW = user32.NewProc("PostMessageW")
 
 func waitTrue(cond func() bool, timeout time.Duration) bool {
 	deadline := time.Now().Add(timeout)

@@ -19,6 +19,7 @@ var assets embed.FS
 func main() {
 	services.SetupLogFile()
 	app := NewApp()
+	app.startHidden = services.StartedByAutostart(os.Args[1:])
 
 	err := wails.Run(&options.App{
 		Title:             "Rewinder",
@@ -27,7 +28,7 @@ func main() {
 		MinHeight:         500,
 		Width:             1024,
 		Height:            768,
-		StartHidden:       services.StartedByAutostart(os.Args[1:]),
+		StartHidden:       app.startHidden,
 		HideWindowOnClose: true,
 		AssetServer: &assetserver.Options{
 			Assets: assets,

@@ -1,17 +1,115 @@
-* { box-sizing: border-box; }
-html, body, #app { width: 100%; height: 100%; margin: 0; overflow: hidden; }
-body { background: var(--bg); color: var(--text); font: 14px/1.45 "Segoe UI Variable Text", "Segoe UI", system-ui, sans-serif; }
-button, input, select { font: inherit; color: inherit; }
-button { cursor: pointer; }
-button, input, select { border: 0; }
-button:disabled { cursor: default; opacity: .4; }
-:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
-button:focus:not(:focus-visible) { outline: none; }
-h1,h2,h3,p { margin: 0; }
-button, a, input, select { --wails-draggable: no-drag; }
-::-webkit-scrollbar { width: 6px; height: 6px; }
-::-webkit-scrollbar-track, ::-webkit-scrollbar-button { display: none; background: transparent; width: 0; height: 0; }
-::-webkit-scrollbar-thumb { background: transparent; border-radius: 999px; }
-:hover::-webkit-scrollbar-thumb { background: #ffffff30; }
-:root[data-motion="off"] *, :root.hidden *, :root.hidden *::before, :root.hidden *::after { animation-play-state: paused !important; transition: none !important; }
-@media (prefers-reduced-motion: reduce) { *, *::before, *::after { animation-duration: 0ms !important; transition-duration: 0ms !important; } }
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#app {
+  width: 100%;
+  height: 100%;
+  margin: 0;
+  overflow: hidden;
+}
+
+body {
+  background: var(--bg);
+  color: var(--text);
+  font: 13px/1.45 var(--font);
+  font-feature-settings: "cv11", "ss01";
+  -webkit-font-smoothing: antialiased;
+  user-select: none;
+}
+
+button,
+input,
+select,
+textarea {
+  font: inherit;
+  color: inherit;
+  border: 0;
+  background: none;
+  margin: 0;
+}
+
+button {
+  cursor: pointer;
+  padding: 0;
+}
+
+button:disabled {
+  cursor: default;
+}
+
+h1,
+h2,
+h3,
+p {
+  margin: 0;
+}
+
+:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+:focus:not(:focus-visible) {
+  outline: none;
+}
+
+/* Frameless window: only the title bar drags; every control stays clickable. */
+button,
+a,
+input,
+select,
+[role="option"],
+[role="slider"] {
+  --wails-draggable: no-drag;
+}
+
+/* Scrollbars: no track, no arrows, a thin rounded thumb that shows on hover. */
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+::-webkit-scrollbar-track,
+::-webkit-scrollbar-button,
+::-webkit-scrollbar-corner {
+  display: none;
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  border: 3px solid transparent;
+  border-radius: 999px;
+  background-clip: padding-box;
+  background-color: transparent;
+}
+:hover::-webkit-scrollbar-thumb {
+  background-color: #ffffff22;
+}
+::-webkit-scrollbar-thumb:hover {
+  background-color: #ffffff3a;
+}
+
+.tabular {
+  font-variant-numeric: tabular-nums;
+}
+
+/* Hidden window or motion off: freeze every animation. */
+:root[data-motion="off"] *,
+:root.hidden *,
+:root.hidden *::before,
+:root.hidden *::after {
+  animation-play-state: paused !important;
+  transition: none !important;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0ms !important;
+    transition-duration: 0ms !important;
+  }
+}

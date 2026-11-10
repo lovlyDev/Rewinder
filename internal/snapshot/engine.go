@@ -74,7 +74,9 @@ func (e *Engine) GetApps() []ipcapi.AppSummary {
 			AppID:           tl.AppID,
 			Name:            tl.Name,
 			ExecutablePath:  tl.Exe,
-			LastActivityUTC: tl.LastActivity.UTC().UnixMilli(),
+			// The last change, not the last time the app was seen: every start of
+			// Rewinder sees all open apps again, which is not news to the user.
+			LastActivityUTC: tl.Snapshots[len(tl.Snapshots)-1].Timestamp.UTC().UnixMilli(),
 			SnapshotCount:   len(tl.Snapshots),
 			TrackingState:   "active",
 			RetentionStatus: "ok",

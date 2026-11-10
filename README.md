@@ -83,12 +83,18 @@ internal/
   services/            wires everything together: capture loop, restore, tracking
 frontend/src/
   App.svelte           picks the view and subscribes to backend events
-  ui/                  small accessible controls, one folder per element
-  features/            titlebar, apps, timeline, overlay and modal settings sections
-  lib/                 event stores, backend actions, visibility and motion
+  ui/                  one folder per control: button, select, switch, slider, segmented,
+                       dialog, tooltip, toast, kbd, avatar, search, swatch, empty, icon
+  features/            titlebar, apps, timeline, overlay, settings (one folder per section)
+  lib/                 stores and backend calls: apps, restore, preferences, hotkey, format
   i18n/                English/Russian dictionaries and language store
-  theme/               CSS tokens, reset and instant theme application
+  theme/               tokens, fonts, reset, and applying appearance settings live
+scripts/icons.mjs      extracts outline + fill Phosphor icons into ui/icon/icons.ts
 ```
+
+The UI is Svelte 5 with [bits-ui](https://bits-ui.com) for dropdowns, sliders, switches,
+tooltips and the settings dialog. Animations use only `transform` and `opacity`, because
+WebView2 renders on the CPU here (its GPU process is turned off to save ~60 MB).
 
 ## Preferences and verification
 
@@ -96,7 +102,7 @@ Settings live in `%LOCALAPPDATA%\Rewinder\settings.json`; background images are 
 
 The quick overlay is a compact always-on-top window on the cursor monitor. **Open Rewinder** restores the main window geometry. Closing the main window hides it in the tray; Exit stops the app.
 
-Run `./scripts/verify.ps1` for all required frontend and Go checks. On Windows this also runs the integration tests and `wails build` under Go 1.24.0. After a production build, `node scripts/ui-smoke.mjs` checks the UI in headless Edge with a mock Wails bridge and saves screenshots to `build/ui-review/`. This does not replace native hotkey/focus checks; see [manual checklist and stage reports](WORK_LOG.md).
+Run `./scripts/verify.ps1` for all required frontend and Go checks. On Windows this also runs the integration tests and `wails build` under Go 1.24.0. Native hotkey and focus behaviour still needs a manual check; see [manual checklist and stage reports](WORK_LOG.md).
 
 Hidden views are unmounted and snapshot events accumulate until the window is shown. There are no frontend polling intervals; toast timeouts stop while hidden. Background blur is rasterized once per image/parameter change. Wails v2 cannot release the WebView2 process memory while hidden.
 

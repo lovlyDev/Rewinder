@@ -4,6 +4,7 @@ package settings
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -117,5 +118,13 @@ func Save(dir string, s Settings) error {
 	if err = f.Close(); err != nil {
 		return err
 	}
-	return replace(f.Name(), filepath.Join(dir, "settings.json"))
+	target := filepath.Join(dir, "settings.json")
+	if err = replace(f.Name(), target); err != nil {
+		// Some file system filters (sandboxes, sync clients, antivirus) refuse the
+		// rename. A direct write is still fine: Load falls back to defaults on a torn file.
+		if werr := os.WriteFile(target, data, 0o600); werr != nil {
+			return fmt.Errorf("replace: %v; direct write: %w", err, werr)
+		}
+	}
+	return nil
 }

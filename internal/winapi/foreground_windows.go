@@ -54,6 +54,20 @@ func ForceForeground(hwnd uintptr) bool {
 	return ForegroundWindow() == hwnd
 }
 
+var procPostMessageW = user32.NewProc("PostMessageW")
+
+const wmSetFocus = 0x0007
+
+// FocusContent makes a Wails window hand keyboard focus to its WebView. Wails
+// does that on WM_SETFOCUS, but Windows sends it only when focus actually moves;
+// if the window itself already has focus, keys stop there. Posting the message
+// runs the same handler on the window's own thread.
+func FocusContent(hwnd uintptr) {
+	if hwnd != 0 {
+		_, _, _ = procPostMessageW.Call(hwnd, wmSetFocus, 0, 0)
+	}
+}
+
 // WaitAndForceForeground waits up to timeout for pid to show a window and makes it
 // the foreground window. It reports whether that worked.
 func WaitAndForceForeground(pid uint32, timeout time.Duration) bool {

@@ -1,59 +1,114 @@
 import { get, writable } from 'svelte/store';
-import { GetApps, GetTimeline, GetAppSummary } from '../../wailsjs/go/main/App';
-import { visible } from './visibility';
+import { GetAppSummary, GetApps, GetTimeline } from '../../wailsjs/go/main/App';
 import { toastError } from './toasts';
 import type { AppSummary, SnapshotCreatedEvent, SnapshotMeta } from './types';
+import { visible } from './visibility';
+
 export const apps = writable<AppSummary[]>([]);
 export const selectedAppID = writable<string | null>(null);
 export const timeline = writable<SnapshotMeta[]>([]);
-const pending = new Map<string, SnapshotMeta[]>();
-let revision = 0;
+
+// While the window is hidden, stores are not touched (no DOM work at all);
+// changes collect here and are published when it is shown again.
 let appCache: AppSummary[] = [];
 let timelineCache: SnapshotMeta[] = [];
-let refreshPromise: Promise<void> | undefined;
+const pending = new Map<string, SnapshotMeta[]>();
+let revision = 0;
 const summaryRevisions = new Map<string, number>();
-const merge = (a: SnapshotMeta[], b: SnapshotMeta[]) => Array.from(new Map([...a,...b].map(s => [s.snapshotID,s])).values()).sort((a,b) => b.timestampUTC-a.timestampUTC).slice(0,500);
-function publish() { if(get(visible)) {apps.set(appCache);timeline.set(timelineCache);} }
+let refreshing: Promise<void> | undefined;
+
+const newestFirst = (a: { lastActivityUTC: number }, b: { lastActivityUTC: number }) => b.lastActivityUTC - a.lastActivityUTC;
+
+/** Union by snapshot ID, newest first, capped like the backend. */
+function merge(a: SnapshotMeta[], b: SnapshotMeta[]) {
+  return Array.from(new Map([...a, ...b].map((s) => [s.snapshotID, s])).values())
+    .sort((x, y) => y.timestampUTC - x.timestampUTC)
+    .slice(0, 500);
+}
+
+function publish() {
+  if (!get(visible)) return;
+  apps.set(appCache);
+  timeline.set(timelineCache);
+}
+
 export async function loadApps(): Promise<AppSummary[]> {
- try {const currentRevision=revision;const list=await GetApps();if(currentRevision===revision) appCache=list;publish();return appCache;}
- catch(e) {toastError('loadFailed',e);return appCache;}
-}
-export async function loadTimeline(appID: string): Promise<SnapshotMeta[]> {
- try {return await GetTimeline(appID);}catch(e){toastError('loadFailed',e);return [];}
-}
-export async function selectApp(appID: string) {
- selectedAppID.set(appID);timelineCache=[];publish();
- const list=await loadTimeline(appID);
- if(get(selectedAppID)===appID){timelineCache=merge(list,timelineCache);publish();}
-}
-export function refresh(): Promise<void> {
- if(refreshPromise)return refreshPromise;
- refreshPromise=(async () => {
-  const list=await loadApps(); const current=get(selectedAppID);
-  const id=current && list.some(a=>a.appID===current) ? current : list[0]?.appID;
-  if(id && get(visible)) {
-   if(id!==current) await selectApp(id);
-   else {const previous=new Set(timelineCache.map(s=>s.snapshotID));const list=await loadTimeline(id);if(get(selectedAppID)===id){timelineCache=merge(list,timelineCache.filter(s=>!previous.has(s.snapshotID)));publish();}}
+  try {
+    const at = revision;
+    const list = await GetApps();
+    if (at === revision) appCache = list; // a snapshot arrived meanwhile: keep its newer counts
+    publish();
+  } catch (e) {
+    toastError('loadFailed', e);
   }
- })().finally(()=>refreshPromise=undefined);
- return refreshPromise;
+  return appCache;
 }
+
+export async function loadTimeline(appID: string): Promise<SnapshotMeta[]> {
+  try {
+    return await GetTimeline(appID);
+  } catch (e) {
+    toastError('loadFailed', e);
+    return [];
+  }
+}
+
+export async function selectApp(appID: string) {
+  if (get(selectedAppID) !== appID) {
+    selectedAppID.set(appID);
+    timelineCache = [];
+    publish();
+  }
+  const list = await loadTimeline(appID);
+  if (get(selectedAppID) === appID) {
+    timelineCache = merge(list, timelineCache);
+    publish();
+  }
+}
+
+/** Reloads everything; concurrent calls share one request. */
+export function refresh(): Promise<void> {
+  refreshing ??= (async () => {
+    const list = await loadApps();
+    const current = get(selectedAppID);
+    const id = current && list.some((a) => a.appID === current) ? current : list[0]?.appID;
+    if (id && get(visible)) await selectApp(id);
+  })().finally(() => (refreshing = undefined));
+  return refreshing;
+}
+
 async function applySnapshots(appID: string, snapshots: SnapshotMeta[]) {
- revision++;
- const requestRevision=(summaryRevisions.get(appID)??0)+1;
- summaryRevisions.set(appID,requestRevision);
- if(get(selectedAppID)===appID) timelineCache=merge(timelineCache,snapshots);
- const latest=snapshots[0];
- appCache=appCache.map(a=>a.appID===appID ? {...a,lastActivityUTC:Math.max(a.lastActivityUTC,latest.timestampUTC)} as AppSummary : a).sort((a,b)=>b.lastActivityUTC-a.lastActivityUTC);
- publish();
- try {
-  const summary=await GetAppSummary(appID);
-  if(summaryRevisions.get(appID)!==requestRevision)return;
-  if(summary){appCache=[summary,...appCache.filter(a=>a.appID!==appID)].sort((a,b)=>b.lastActivityUTC-a.lastActivityUTC);publish();if(!get(selectedAppID)&&get(visible))await selectApp(appID);}
- } catch(e){toastError('loadFailed',e);}
+  revision++;
+  const mine = (summaryRevisions.get(appID) ?? 0) + 1;
+  summaryRevisions.set(appID, mine);
+  if (get(selectedAppID) === appID) timelineCache = merge(timelineCache, snapshots);
+  const latest = snapshots[0].timestampUTC;
+  appCache = appCache
+    .map((a) => (a.appID === appID ? ({ ...a, lastActivityUTC: Math.max(a.lastActivityUTC, latest) } as AppSummary) : a))
+    .sort(newestFirst);
+  publish();
+  try {
+    const summary = await GetAppSummary(appID);
+    if (summaryRevisions.get(appID) !== mine || !summary) return;
+    appCache = [summary, ...appCache.filter((a) => a.appID !== appID)].sort(newestFirst);
+    publish();
+    if (!get(selectedAppID) && get(visible)) await selectApp(appID);
+  } catch (e) {
+    toastError('loadFailed', e);
+  }
 }
+
 export function onSnapshotCreated(p: SnapshotCreatedEvent) {
- if(!get(visible)){pending.set(p.appID,merge(pending.get(p.appID)??[],[p.snapshot]));return;}
- void applySnapshots(p.appID,[p.snapshot]);
+  if (!get(visible)) {
+    pending.set(p.appID, merge(pending.get(p.appID) ?? [], [p.snapshot]));
+    return;
+  }
+  void applySnapshots(p.appID, [p.snapshot]);
 }
-visible.subscribe(shown=>{if(!shown)return;publish();for(const [id,list] of pending)void applySnapshots(id,list);pending.clear();});
+
+visible.subscribe((shown) => {
+  if (!shown) return;
+  publish();
+  for (const [id, list] of pending) void applySnapshots(id, list);
+  pending.clear();
+});

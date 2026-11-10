@@ -1,18 +1,45 @@
 <script lang="ts">
- import { onMount } from 'svelte';
- import { GetAutostart, SetAutostart, PauseTracking, ResumeTracking, ExitApp } from '../../../../wailsjs/go/main/App';
- import { t } from '../../../i18n';
- import { trackingState } from '../../../lib/ui';
- import { toastError } from '../../../lib/toasts';
- import Switch from '../../../ui/switch/Switch.svelte';
- import Button from '../../../ui/button/Button.svelte';
- import '../settings.css';
- let autostart=false;let busy=false;
- onMount(()=>{void GetAutostart().then(value=>autostart=value).catch(e=>toastError('saveFailed',e));});
- async function changeAutostart(e: CustomEvent<boolean>) {busy=true;try{await SetAutostart(e.detail);}catch(error){autostart=!e.detail;toastError('saveFailed',error);}finally{busy=false;}}
+  import { onMount } from 'svelte';
+  import { ExitApp, GetAutostart, PauseTracking, ResumeTracking, SetAutostart } from '../../../../wailsjs/go/main/App';
+  import { t } from '../../../i18n';
+  import { toastError } from '../../../lib/toasts';
+  import { trackingState } from '../../../lib/ui';
+  import Button from '../../../ui/button/Button.svelte';
+  import Switch from '../../../ui/switch/Switch.svelte';
+  import SettingRow from '../SettingRow.svelte';
+
+  let autostart = $state(false);
+  let busy = $state(false);
+
+  onMount(() => {
+    GetAutostart()
+      .then((v) => (autostart = v))
+      .catch((e) => toastError('saveFailed', e));
+  });
+
+  async function changeAutostart(v: boolean) {
+    busy = true;
+    try {
+      await SetAutostart(v);
+    } catch (e) {
+      autostart = !v;
+      toastError('saveFailed', e);
+    } finally {
+      busy = false;
+    }
+  }
 </script>
-<div class="settings-section"><h2>{$t('general')}</h2>
- <div class="row"><div class="label"><span>{$t('autostart')}</span><span class="hint">{$t('autostartHint')}</span></div><Switch label={$t('autostart')} bind:checked={autostart} disabled={busy} on:change={changeAutostart} /></div>
- <div class="row"><div class="label"><span>{$t('tracking')}</span><span class="hint">{$t($trackingState)}</span></div><Switch label={$t('tracking')} checked={$trackingState==='active'} on:change={e=>e.detail?ResumeTracking(null):PauseTracking(null)} /></div>
- <div class="field"><span class="hint">{$t('exitHint')}</span><div><Button icon="power" on:click={()=>ExitApp()}>{$t('exit')}</Button></div></div>
-</div>
+
+<SettingRow label={$t('autostart')} hint={$t('autostartHint')}>
+  <Switch label={$t('autostart')} bind:checked={autostart} disabled={busy} onchange={changeAutostart} />
+</SettingRow>
+<SettingRow label={$t('tracking')} hint={$t($trackingState)}>
+  <Switch
+    label={$t('tracking')}
+    checked={$trackingState === 'active'}
+    onchange={(on) => (on ? ResumeTracking(null) : PauseTracking(null))}
+  />
+</SettingRow>
+<SettingRow label={$t('exit')} hint={$t('exitHint')}>
+  <Button variant="danger" icon="power" onclick={() => ExitApp()}>{$t('exitShort')}</Button>
+</SettingRow>
