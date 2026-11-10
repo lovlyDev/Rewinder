@@ -1,0 +1,12 @@
+.settings-section { display: grid; gap: 24px; align-content: start; }
+.settings-section h2 { font-size: 22px; font-weight: 600; margin: 0 0 4px; }
+.settings-section .row { display: flex; justify-content: space-between; align-items: center; gap: 18px; }
+.settings-section .label { display: grid; gap: 5px; }
+.settings-section .hint { color: var(--muted); font-size: 12px; line-height: 1.6; }
+.settings-section .field { display: grid; gap: 12px; }
+.settings-section select { background: var(--raised); border-radius: var(--small-radius); padding: 10px 12px; width: 100%; }
+.settings-section .choices { display: flex; gap: 6px; flex-wrap: wrap; }
+.settings-section .choice { padding: 8px 12px; border-radius: var(--small-radius); background: var(--raised); transition: transform var(--quick) var(--ease); }
+.settings-section .choice:active { transform: scale(.97); }
+.settings-section .choice[aria-pressed="true"] { color: var(--accent); background: var(--accent-soft); }
+.settings-section .error { color: var(--danger); font-size: 12px; }

@@ -1,9 +1,4 @@
-const dateTime = new Intl.DateTimeFormat(undefined, { dateStyle: 'short', timeStyle: 'medium' });
-
-export function when(utcMillis: number): string {
-  return dateTime.format(utcMillis);
-}
-
-export function windows(n: number): string {
-  return n === 1 ? '1 window' : `${n} windows`;
-}
+import { get } from 'svelte/store';
+import { language, t } from '../i18n';
+export function when(utcMillis: number) {return new Intl.DateTimeFormat(get(language),{dateStyle:'short',timeStyle:'medium'}).format(utcMillis);}
+export function windows(n: number) {return get(t)('windows',{n});}

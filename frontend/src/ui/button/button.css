@@ -1,0 +1,7 @@
+.button { display: inline-flex; align-items: center; justify-content: center; gap: 9px; padding: 10px 16px; min-height: 38px; background: var(--raised); color: var(--text); border: 0; border-radius: var(--small-radius); transition: transform var(--quick) var(--ease), opacity var(--quick) var(--ease); }
+.button:hover { background: var(--hover); }
+.button:active { transform: scale(.97); }
+.button.primary { background: var(--accent); color: var(--accent-ink); }
+.button.icon { padding: 8px; width: 36px; height: 36px; min-height: 36px; background: transparent; color: var(--muted); }
+.button.icon:hover { color: var(--text); background: var(--raised); }
+.button.icon[aria-pressed="true"] { color: var(--accent); background: var(--accent-soft); }

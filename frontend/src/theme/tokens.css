@@ -1,0 +1,8 @@
+:root {
+ --bg: #0a0a0c; --surface: #111114; --raised: #19191d; --hover: #222227;
+ --text: #f1f0f6; --muted: #a4a3b1; --accent: #a99bff; --accent-ink: #101014;
+ --accent-soft: #a99bff18; --radius: 14px; --small-radius: calc(var(--radius) * .6);
+ --space: 16px; --row: 66px; --duration: 180ms; --quick: 140ms;
+ --ease: cubic-bezier(.2,.8,.2,1); --danger: #ff929e; --ok: #85dbb1;
+ --scrim: #000a; --background-image: none;
+}

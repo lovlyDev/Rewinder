@@ -3,6 +3,8 @@ import type { TrackingState, View } from './types';
 
 export const view = writable<View>('timeline');
 export const trackingState = writable<TrackingState>('active');
+export const settingsOpen = writable(false);
+export const appPaused = writable<Record<string, boolean>>({});
 
 // Each hotkey press creates a new request, so the overlay reloads even if it is already open.
 export const overlayRequest = writable<{ appID?: string; seq: number }>({ seq: 0 });
