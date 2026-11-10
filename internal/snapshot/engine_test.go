@@ -192,3 +192,58 @@ func TestSaveOnlyWritesWhenChanged(t *testing.T) {
 		t.Fatal("Save rewrote an unchanged timeline")
 	}
 }
+
+func TestSnapshotAfterRestorePointsBack(t *testing.T) {
+	e := NewEngine(EngineConfig{})
+	base := time.Now()
+	e.now = func() time.Time { return base }
+	a := appAt(base, 100)
+	m1, _ := e.Ingest(a)
+	m2, _ := e.Ingest(appAt(base.Add(time.Second), 200))
+
+	e.MarkRestore("notepad.exe:0011", m1.SnapshotID)
+	e.now = func() time.Time { return base.Add(3 * time.Second) }
+	m3, _ := e.Ingest(appAt(base.Add(3*time.Second), 100))
+	if m3 == nil || m3.RestoredFrom != m1.SnapshotID {
+		t.Fatalf("snapshot after restore = %+v, want restoredFrom %s", m3, m1.SnapshotID)
+	}
+	m4, _ := e.Ingest(appAt(base.Add(4*time.Second), 300))
+	if m4.RestoredFrom != "" {
+		t.Fatal("only the first snapshot after a restore is its result")
+	}
+	_ = m2
+
+	// A marker that is never consumed in time does not attach to a much later change.
+	e.MarkRestore("notepad.exe:0011", m1.SnapshotID)
+	e.now = func() time.Time { return base.Add(time.Minute) }
+	m5, _ := e.Ingest(appAt(base.Add(time.Minute), 400))
+	if m5.RestoredFrom != "" {
+		t.Fatal("stale restore marker attached")
+	}
+}
+
+func appAt(ts time.Time, left int32) *state.AppState {
+	return app(ts, win(1, left, 10, left+300, 300))
+}
+
+func TestDeleteAppRemovesFile(t *testing.T) {
+	dir := t.TempDir()
+	now := time.Now()
+	e := newTestEngine(t, dir, now)
+	if _, err := e.Ingest(app(now, win(1, 0, 0, 100, 100))); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.Save(); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.DeleteApp("notepad.exe:0011"); err != nil {
+		t.Fatal(err)
+	}
+	if len(e.GetApps()) != 0 {
+		t.Fatal("app still listed")
+	}
+	again := newTestEngine(t, dir, now)
+	if err := again.Load(); err != nil || len(again.GetApps()) != 0 {
+		t.Fatalf("deleted history came back after reload: %v", again.GetApps())
+	}
+}

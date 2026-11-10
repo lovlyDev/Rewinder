@@ -33,6 +33,7 @@
   <span class="meta">
     <span class="chip">{$t('windows', { n: snapshot.windowsCount })}</span>
     {#if snapshot.filesAdded}<span class="chip add">+{snapshot.filesAdded} {$t('filesShort')}</span>{/if}
+    {#if snapshot.restoredFrom}<span class="chip back">{$t('restoredBadge')}</span>{/if}
     {#if snapshot.filesRemoved}<span class="chip del">−{snapshot.filesRemoved} {$t('filesShort')}</span>{/if}
   </span>
   {#if current}<span class="now">{$t('current')}</span>{/if}
@@ -144,6 +145,9 @@
   }
   .del {
     color: var(--danger);
+  }
+  .back {
+    color: var(--accent);
   }
   .now {
     padding: 3px 9px;

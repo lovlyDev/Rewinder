@@ -7,7 +7,14 @@ import { toastError } from './toasts';
 export type Settings = settings.Settings;
 
 export const preferences = writable<Settings | null>(null);
-export const appInfo = writable({ version: '', logPath: '', historyPath: '', systemLanguage: 'en' });
+export const appInfo = writable({
+  version: '',
+  logPath: '',
+  historyPath: '',
+  systemLanguage: 'en',
+  elevated: false,
+  elevationDeclined: false,
+});
 
 // Writes run one after another, so a fast slider can never persist an older value last.
 let queue: Promise<unknown> = Promise.resolve();
@@ -33,8 +40,10 @@ export function savePreferences(next: Settings): Promise<void> {
   preferences.set(copy);
   void applyTheme(copy, get(appInfo).systemLanguage);
   const result = queue.then(async () => {
-    // The hotkey is saved through SetHotkey; never let a theme edit undo it.
-    copy.hotkey = (await GetSettings()).hotkey;
+    // The hotkey and the admin mode have their own calls; never let a theme edit undo them.
+    const saved = await GetSettings();
+    copy.hotkey = saved.hotkey;
+    copy.runAsAdmin = saved.runAsAdmin;
     await SaveSettings(copy);
   });
   queue = result.catch(() => {});

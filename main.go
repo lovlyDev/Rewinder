@@ -3,9 +3,12 @@ package main
 import (
 	"context"
 	"embed"
+	"log"
 	"os"
 
 	"Rewinder/internal/services"
+	"Rewinder/internal/update"
+	"Rewinder/internal/winapi"
 
 	"github.com/wailsapp/wails/v2"
 	"github.com/wailsapp/wails/v2/pkg/options"
@@ -18,8 +21,26 @@ var assets embed.FS
 
 func main() {
 	services.SetupLogFile()
+	waitForPreviousInstance(os.Args[1:])
+	if exe, err := os.Executable(); err == nil {
+		update.CleanupOld(exe) // leftovers of a previous self-update
+	}
 	app := NewApp()
 	app.startHidden = services.StartedByAutostart(os.Args[1:])
+
+	// "Run as administrator": start the elevated copy and leave. If the user says
+	// no to UAC, carry on without rights; the settings page explains it.
+	if app.preferences.RunAsAdmin && !winapi.SelfElevated() {
+		if err := restartElevated(); err == nil {
+			return
+		} else {
+			log.Printf("rewinder: not elevated: %v", err)
+			app.elevationDeclined = true
+		}
+	}
+	if err := services.SyncAutostart(app.preferences.RunAsAdmin && winapi.SelfElevated()); err != nil {
+		log.Printf("rewinder: autostart: %v", err)
+	}
 
 	err := wails.Run(&options.App{
 		Title:             "Rewinder",

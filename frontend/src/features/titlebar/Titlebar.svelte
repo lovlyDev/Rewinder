@@ -2,7 +2,9 @@
   import { HideWindow, MinimiseWindow, PauseTracking, ResumeTracking } from '../../../wailsjs/go/main/App';
   import logo from '../../assets/logo.png';
   import { t } from '../../i18n';
-  import { settingsOpen, trackingState } from '../../lib/ui';
+  import { settingsOpen, settingsSection, trackingState } from '../../lib/ui';
+  import { updateInfo } from '../../lib/update';
+  import Icon from '../../ui/icon/Icon.svelte';
   import IconButton from '../../ui/button/IconButton.svelte';
   import Tooltip from '../../ui/tooltip/Tooltip.svelte';
 
@@ -31,6 +33,19 @@
       </button>
     {/snippet}
   </Tooltip>
+
+  {#if $updateInfo?.available}
+    <button
+      class="update"
+      onclick={() => {
+        settingsSection.set('about');
+        settingsOpen.set(true);
+      }}
+    >
+      <Icon name="download" size={14} />
+      {$t('updatePill', { version: $updateInfo.version })}
+    </button>
+  {/if}
 
   <span class="drag"></span>
 
@@ -130,6 +145,22 @@
   .failed {
     background: #ff8f9c14;
     color: var(--danger);
+  }
+  .update {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    height: 26px;
+    padding: 0 11px 0 9px;
+    border-radius: 999px;
+    background: var(--accent-soft);
+    color: var(--accent);
+    font-size: 11px;
+    font-weight: 600;
+    transition: transform var(--quick) var(--ease);
+  }
+  .update:active {
+    transform: scale(0.95);
   }
   .drag {
     flex: 1;

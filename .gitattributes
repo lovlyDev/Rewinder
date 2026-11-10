@@ -1,0 +1,7 @@
+# Source stays LF in the repository and on every checkout, so gofmt, Prettier
+# and the CI byte-for-byte checks agree on Windows too.
+* text=auto eol=lf
+*.ico binary
+*.png binary
+*.woff2 binary
+*.exe binary

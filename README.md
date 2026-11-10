@@ -12,8 +12,14 @@
   - **File Explorer**: remembers which folders were open and reopens the missing ones.
   - **Word, Excel, PowerPoint**: remember open documents and reopen them.
   - **Chrome, Edge, Brave, Vivaldi, Opera**: relaunch with the same profile and `--restore-last-session`.
+- **Undo the undo, the right way.** A state that came from a restore is marked, so the next `Ctrl + Alt + Z` goes further back instead of flipping back and forth.
+- **Preview before you restore**: a minimap of the monitors and windows of every snapshot.
+- **Named layouts**: save where all open apps are ("Work", "Stream") and put them all back with one click, from the tray, or with `Ctrl + Alt + 1…9`.
+- **Unplugged monitor? No lost windows.** A window saved on a monitor that is gone comes back onto the primary one.
+- **Exclusions**: stop tracking any app and delete its history.
 - **History survives a reboot**: 7 days, up to 500 snapshots per app.
-- **No administrator rights needed.**
+- **No administrator rights needed.** To restore apps that run as administrator, turn on *Run as administrator* (UAC asks once; autostart then uses a Task Scheduler task).
+- **Updates itself** from GitHub Releases: checks after start and every 6 hours, verifies the SHA-256 checksum (and the signature when releases are signed), swaps the exe and restarts quietly. Can be set to *ask first* or *off*.
 
 ## What it does not do
 
@@ -65,6 +71,18 @@ Integration tests open real windows on the desktop, move, close and restore them
 ```bash
 go test -tags integration ./...
 ```
+
+## CI and releases
+
+- **CI** (`.github/workflows/ci.yml`, every push and pull request, Windows runner): gofmt, `go vet`, unit tests, `svelte-check`, frontend build, a check that `icons.ts` matches the pinned Phosphor version, integration tests on the runner's desktop (reported, not blocking) and a `Rewinder.exe` artifact.
+- **Release** (`.github/workflows/release.yml`): push a tag `vMAJOR.MINOR.PATCH` (a `-beta.1` suffix makes a pre-release). It stamps the version into the exe, builds `Rewinder.exe` and the NSIS installer, signs both when a certificate is configured, writes `SHA256SUMS.txt` and publishes the GitHub Release. The built-in updater reads exactly that release.
+
+  ```bash
+  git tag v0.3.0
+  git push origin v0.3.0
+  ```
+- **Code signing** is optional. Add two repository secrets: `WINDOWS_CERT_PFX` (the `.pfx` certificate, base64) and `WINDOWS_CERT_PASSWORD`. Once releases are signed, the updater refuses any later build that is not signed. Without a certificate Windows SmartScreen warns on first start; free signing for open-source projects is available from [SignPath Foundation](https://signpath.org).
+- **Dependabot** keeps Go modules, npm packages and the actions up to date (Wails stays pinned at 2.11).
 
 ## Project layout
 

@@ -5,6 +5,7 @@
 
   type Props = { open: boolean; label: string; children: Snippet };
   let { open = $bindable(), label, children }: Props = $props();
+  let panel = $state<HTMLElement>();
 </script>
 
 <!-- Focus trap, Esc, outside click and focus return come from bits-ui. -->
@@ -15,10 +16,18 @@
         {#if open}<div {...props} class="scrim" transition:fade></div>{/if}
       {/snippet}
     </Dialog.Overlay>
-    <Dialog.Content forceMount>
+    <!-- Focus the panel itself, not its first button: otherwise a mouse-opened
+         dialog greets the user with a focus ring on some control. -->
+    <Dialog.Content
+      forceMount
+      onOpenAutoFocus={(e) => {
+        e.preventDefault();
+        panel?.focus();
+      }}
+    >
       {#snippet child({ props, open })}
         {#if open}
-          <div {...props} class="panel" aria-label={label} transition:pop={{ from: 0.965 }}>
+          <div {...props} bind:this={panel} tabindex="-1" class="panel" aria-label={label} transition:pop={{ from: 0.965 }}>
             <Dialog.Title class="sr-only">{label}</Dialog.Title>
             {@render children()}
           </div>

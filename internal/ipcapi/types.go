@@ -10,6 +10,7 @@ type AppSummary struct {
 	SnapshotCount   int    `json:"snapshotCount"`
 	TrackingState   string `json:"trackingState"`
 	RetentionStatus string `json:"retentionStatus"`
+	Excluded        bool   `json:"excluded"` // the user stopped tracking this executable
 }
 
 type SnapshotMeta struct {
@@ -19,6 +20,7 @@ type SnapshotMeta struct {
 	WindowsCount int    `json:"windowsCount"`
 	FilesAdded   int    `json:"filesAdded"`
 	FilesRemoved int    `json:"filesRemoved"`
+	RestoredFrom string `json:"restoredFrom,omitempty"`
 }
 
 type SnapshotCreatedEvent struct {
@@ -53,3 +55,31 @@ type TrackingStateChangedEvent struct {
 }
 
 func NowUTC() int64 { return time.Now().UTC().UnixMilli() }
+
+// LayoutRect is a rectangle in screen pixels.
+type LayoutRect struct {
+	X int32 `json:"x"`
+	Y int32 `json:"y"`
+	W int32 `json:"w"`
+	H int32 `json:"h"`
+}
+
+type LayoutWindow struct {
+	Rect       LayoutRect `json:"rect"`
+	Title      string     `json:"title"`
+	Minimized  bool       `json:"minimized"`
+	Maximized  bool       `json:"maximized"`
+	Foreground bool       `json:"foreground"`
+}
+
+type LayoutMonitor struct {
+	Rect    LayoutRect `json:"rect"`
+	Primary bool       `json:"primary"`
+}
+
+// SnapshotLayout is what a snapshot looks like on screen: the monitors connected
+// now and the saved windows, for the preview minimap.
+type SnapshotLayout struct {
+	Monitors []LayoutMonitor `json:"monitors"`
+	Windows  []LayoutWindow  `json:"windows"`
+}

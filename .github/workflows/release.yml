@@ -1,0 +1,121 @@
+name: Release
+
+# Push a tag like v0.3.0 to build, sign (when a certificate is configured),
+# checksum and publish a GitHub Release. Rewinder's updater reads that release:
+# it needs the assets Rewinder.exe and SHA256SUMS.txt.
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing tag to (re)build, e.g. v0.3.0"
+        required: true
+
+permissions:
+  contents: write
+
+env:
+  GO_VERSION: "1.24.x"
+  NODE_VERSION: "22"
+  WAILS_VERSION: "v2.11.0"
+
+jobs:
+  release:
+    runs-on: windows-latest
+    env:
+      # secrets cannot be used in `if:` directly; expose whether one is set
+      HAS_CERT: ${{ secrets.WINDOWS_CERT_PFX != '' }}
+    steps:
+      - run: git config --global core.autocrlf false
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+          fetch-depth: 0
+
+      - name: Version from the tag
+        id: version
+        shell: bash
+        run: |
+          tag="${{ inputs.tag || github.ref_name }}"
+          version="${tag#v}"
+          if ! [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$ ]]; then
+            echo "Tag $tag is not a semantic version (vMAJOR.MINOR.PATCH)"; exit 1
+          fi
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          if [[ "$version" == *-* ]]; then echo "prerelease=true" >> "$GITHUB_OUTPUT"; else echo "prerelease=false" >> "$GITHUB_OUTPUT"; fi
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Tests
+        shell: bash
+        run: |
+          (cd frontend && npm ci && npx svelte-check --tsconfig ./tsconfig.json --fail-on-warnings)
+          go vet ./...
+          go test -count=1 ./...
+
+      - name: Tools (Wails CLI, NSIS)
+        run: |
+          go install github.com/wailsapp/wails/v2/cmd/wails@${{ env.WAILS_VERSION }}
+          choco install nsis --no-progress -y
+
+      - name: Stamp the version into wails.json (exe properties, installer)
+        shell: pwsh
+        run: |
+          $json = Get-Content wails.json -Raw | ConvertFrom-Json
+          $json.info.productVersion = "${{ steps.version.outputs.version }}"
+          $json | ConvertTo-Json -Depth 10 | Set-Content wails.json -Encoding utf8
+
+      - name: Build exe and installer
+        shell: bash
+        run: |
+          export PATH="$PATH:/c/Program Files (x86)/NSIS"
+          wails build -clean -trimpath -nsis -ldflags "-s -w -X main.version=${{ steps.version.outputs.version }}"
+          ls -la build/bin
+
+      # Signing is optional. Add the repository secrets WINDOWS_CERT_PFX (the
+      # .pfx file, base64) and WINDOWS_CERT_PASSWORD to sign both files. Signed
+      # releases make the updater refuse any later build that is not signed.
+      - name: Sign
+        if: env.HAS_CERT == 'true'
+        env:
+          CERT: ${{ secrets.WINDOWS_CERT_PFX }}
+          CERT_PASSWORD: ${{ secrets.WINDOWS_CERT_PASSWORD }}
+        shell: pwsh
+        run: |
+          $pfx = Join-Path $env:RUNNER_TEMP "cert.pfx"
+          [IO.File]::WriteAllBytes($pfx, [Convert]::FromBase64String($env:CERT))
+          $signtool = Get-ChildItem "${env:ProgramFiles(x86)}\Windows Kits\10\bin\*\x64\signtool.exe" | Sort-Object FullName -Descending | Select-Object -First 1
+          foreach ($file in Get-ChildItem build/bin/*.exe) {
+            & $signtool.FullName sign /f $pfx /p $env:CERT_PASSWORD /fd SHA256 /tr http://timestamp.digicert.com /td SHA256 /d Rewinder $file.FullName
+            if ($LASTEXITCODE -ne 0) { throw "signing $($file.Name) failed" }
+          }
+          Remove-Item $pfx
+
+      - name: Checksums
+        shell: bash
+        working-directory: build/bin
+        run: sha256sum *.exe > SHA256SUMS.txt && cat SHA256SUMS.txt
+
+      - name: Publish the release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          flags=(--title "Rewinder ${{ steps.version.outputs.version }}" --generate-notes --verify-tag)
+          if [ "${{ steps.version.outputs.prerelease }}" = "true" ]; then flags+=(--prerelease); fi
+          cd build/bin
+          if gh release view "${{ steps.version.outputs.tag }}" >/dev/null 2>&1; then
+            gh release upload "${{ steps.version.outputs.tag }}" *.exe SHA256SUMS.txt --clobber
+          else
+            gh release create "${{ steps.version.outputs.tag }}" *.exe SHA256SUMS.txt "${flags[@]}"
+          fi

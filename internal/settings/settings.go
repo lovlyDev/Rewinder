@@ -31,10 +31,16 @@ type Settings struct {
 	Hotkey   hotkey.Combination `json:"hotkey"`
 	Language string             `json:"language"`
 	Theme    Theme              `json:"theme"`
+	// RunAsAdmin restarts Rewinder elevated, so it can move the windows of
+	// applications that run as administrator.
+	RunAsAdmin bool `json:"runAsAdmin"`
+	// Updates: "auto" checks GitHub for a new version and offers it, "install"
+	// also installs it on its own (restarting quietly into the tray), "off" never checks.
+	Updates string `json:"updates"`
 }
 
 func Default() Settings {
-	return Settings{Hotkey: hotkey.Default(), Language: "system", Theme: Theme{Accent: "#a99bff", Radius: 14, Density: "normal", Motion: "normal", Background: Background{Kind: "color", Color: "#0a0a0c", EndColor: "#171126", Dim: 0.65}}}
+	return Settings{Hotkey: hotkey.Default(), Language: "system", Updates: "install", Theme: Theme{Accent: "#a99bff", Radius: 14, Density: "normal", Motion: "normal", Background: Background{Kind: "color", Color: "#0a0a0c", EndColor: "#171126", Dim: 0.65}}}
 }
 
 var color = regexp.MustCompile(`^#[0-9a-fA-F]{6}$`)
@@ -61,6 +67,9 @@ func (s Settings) Validate() error {
 	}
 	if b.Kind != "color" && b.Kind != "gradient" && b.Kind != "image" {
 		return errors.New("settings.background")
+	}
+	if s.Updates != "" && s.Updates != "auto" && s.Updates != "install" && s.Updates != "off" {
+		return errors.New("settings.updates")
 	}
 	if b.Image != "" && b.Image != "background.png" {
 		return errors.New("settings.image")

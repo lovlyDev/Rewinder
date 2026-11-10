@@ -97,6 +97,21 @@ func (e *Engine) Save() error {
 
 func (e *Engine) Close() error { return e.Save() }
 
+// DeleteApp removes an app's whole timeline from memory and disk.
+func (e *Engine) DeleteApp(appID string) error {
+	e.mu.Lock()
+	delete(e.apps, appID)
+	delete(e.restores, appID)
+	e.mu.Unlock()
+	if e.cfg.StorageDir == "" {
+		return nil
+	}
+	if err := os.Remove(e.fileFor(appID)); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	return nil
+}
+
 func (e *Engine) markDirty(tl *appTimeline) {
 	e.mu.Lock()
 	tl.dirty = true

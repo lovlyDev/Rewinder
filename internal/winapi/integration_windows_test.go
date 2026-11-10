@@ -106,7 +106,6 @@ func TestEnumWindowsManyTimes(t *testing.T) {
 	}
 }
 
-
 func waitTrue(cond func() bool, timeout time.Duration) bool {
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {

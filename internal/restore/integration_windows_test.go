@@ -224,3 +224,27 @@ func TestRestoreFailsLoudlyWhenNothingMatches(t *testing.T) {
 		t.Fatal("restore must report an error instead of claiming success")
 	}
 }
+
+// A window saved on a monitor that is no longer there must come back onto a
+// monitor that exists, not to coordinates nobody can see.
+func TestRestoreBringsBackWindowFromMissingMonitor(t *testing.T) {
+	defer killHelpers()
+	cmd, hwnd := startHelper(t, "Monitor Test")
+	full := capture(t, cmd.Process.Pid)
+	gone := state.Rect{Left: 30000, Top: 200, Right: 30600, Bottom: 600} // far right of any real desktop
+	full.App.Windows[0].NormalRect = gone
+	full.App.Windows[0].Rect = gone
+
+	if _, err := newEngine().RestoreSnapshot(noProgress, nil, full); err != nil {
+		t.Fatal(err)
+	}
+	works := winapi.WorkspaceWorkAreas()
+	p := placementOf(t, hwnd)
+	r := p.NormalRect
+	if r.Right-r.Left != 600 || r.Bottom-r.Top != 400 {
+		t.Fatalf("size changed: %+v", r)
+	}
+	if r.Left < works[0].Left || r.Right > works[0].Right || r.Top < works[0].Top || r.Bottom > works[0].Bottom {
+		t.Fatalf("window at %+v is not on the primary monitor %+v", r, works[0])
+	}
+}

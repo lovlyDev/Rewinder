@@ -13,6 +13,9 @@
   import IconButton from '../../ui/button/IconButton.svelte';
   import Empty from '../../ui/empty/Empty.svelte';
   import Kbd from '../../ui/kbd/Kbd.svelte';
+  import { undoIndex } from '../../lib/undo';
+  import { snapshotLayout, type SnapshotLayout } from '../../lib/preview';
+  import Minimap from '../../ui/minimap/Minimap.svelte';
   import Scrubber from './Scrubber.svelte';
 
   /** The app the user was in when they pressed the hotkey. */
@@ -28,6 +31,16 @@
 
   const current = $derived(snapshots[index]);
 
+  let layout = $state<SnapshotLayout | null>(null);
+  $effect(() => {
+    const id = current?.snapshotID;
+    const owner = app?.appID;
+    if (!id || !owner) return;
+    void snapshotLayout(owner, id).then((l) => {
+      if (current?.snapshotID === id) layout = l;
+    });
+  });
+
   async function load() {
     const list = await loadApps();
     // If the app the user was in has no history yet, fall back to the most recent one.
@@ -36,8 +49,9 @@
     if (!alive) return;
     app = found;
     snapshots = history;
-    // The newest snapshot is the current state; start one step back, which is what "undo" means.
-    index = Math.min(1, Math.max(0, history.length - 1));
+    // The newest snapshot is the current state; start one step back (or further,
+    // when the current state is the result of an earlier restore).
+    index = undoIndex(history);
     loaded = true;
     await tick();
     // The UI is not drawn while the window is hidden, so ask Go to activate it now
@@ -124,16 +138,20 @@
 
   {#if current}
     <div class="moment">
-      {#key current.snapshotID}
-        <div class="when" in:rise={{ y: 4 }}>
-          <span class="time tabular">{clockSeconds(current.timestampUTC, $language)}</span>
-          <span class="sub">{day(current.timestampUTC, $language)} · {ago(current.timestampUTC, $language, $now)}</span>
+      <div class="left">
+        {#key current.snapshotID}
+          <div class="when" in:rise={{ y: 4 }}>
+            <span class="time tabular">{clockSeconds(current.timestampUTC, $language)}</span>
+            <span class="sub">{day(current.timestampUTC, $language)} · {ago(current.timestampUTC, $language, $now)}</span>
+          </div>
+        {/key}
+        <div class="tags">
+          <span class="chip">{$t('windows', { n: current.windowsCount })}</span>
+          {#if index === 0}<span class="chip now">{$t('current')}</span>{/if}
+          {#if current.restoredFrom}<span class="chip back">{$t('restoredBadge')}</span>{/if}
         </div>
-      {/key}
-      <div class="tags">
-        <span class="chip">{$t('windows', { n: current.windowsCount })}</span>
-        {#if index === 0}<span class="chip now">{$t('current')}</span>{/if}
       </div>
+      <div class="map"><Minimap {layout} label={$t('previewLabel')} /></div>
     </div>
 
     <div class="scrub">
@@ -161,7 +179,7 @@
   .overlay {
     display: flex;
     flex-direction: column;
-    gap: 10px;
+    gap: 6px;
     height: 100vh;
     padding: 12px 14px 14px 18px;
     background: var(--surface);
@@ -193,10 +211,27 @@
   }
   .moment {
     display: flex;
-    align-items: flex-end;
+    align-items: center;
     justify-content: space-between;
-    gap: 12px;
+    gap: 16px;
     padding: 0 4px;
+  }
+  .left {
+    display: grid;
+    gap: 6px;
+  }
+  .map {
+    display: grid;
+    place-items: center;
+    width: 156px;
+    height: 78px;
+    flex: none;
+    padding: 6px;
+    border-radius: var(--r-sm);
+    background: var(--raised);
+  }
+  .chip.back {
+    color: var(--accent);
   }
   .when {
     display: grid;
@@ -214,7 +249,6 @@
   .tags {
     display: flex;
     gap: 6px;
-    padding-bottom: 4px;
   }
   .chip {
     padding: 4px 10px;

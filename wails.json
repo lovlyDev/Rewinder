@@ -2,7 +2,7 @@
   "$schema": "https://wails.io/schemas/config.v2.json",
   "name": "Rewinder",
   "outputfilename": "Rewinder",
-  "frontend:install": "npm install",
+  "frontend:install": "npm ci",
   "frontend:build": "npm run build",
   "frontend:dev:watcher": "npm run dev",
   "frontend:dev:serverUrl": "auto",
@@ -12,13 +12,8 @@
   },
   "info": {
     "productName": "Rewinder",
-    "productVersion": "0.2.0",
+    "productVersion": "0.3.0",
     "copyright": "Copyright © 2026 lovlygod",
     "comments": "App Time Machine for Windows"
-  },
-  "build": {
-    "windows": {
-      "icon": "internal/trayhotkey/icon.ico"
-    }
   }
 }

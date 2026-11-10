@@ -3,7 +3,8 @@
   import type { Component } from 'svelte';
   import { GetWindowVisible } from '../wailsjs/go/main/App';
   import { EventsOn } from '../wailsjs/runtime/runtime';
-  import AppList from './features/apps/AppList.svelte';
+  import LayoutView from './features/layouts/LayoutView.svelte';
+  import Sidebar from './features/sidebar/Sidebar.svelte';
   import Overlay from './features/overlay/Overlay.svelte';
   import Timeline from './features/timeline/Timeline.svelte';
   import Titlebar from './features/titlebar/Titlebar.svelte';
@@ -13,7 +14,10 @@
   import { onRestoreError } from './lib/restore';
   import { pushMessage, toastError } from './lib/toasts';
   import type { OverlayRequest, RestoreProgressEvent, TrackingStateChangedEvent } from './lib/types';
-  import { appPaused, overlayRequest, requestOverlay, settingsOpen, trackingState, view } from './lib/ui';
+  import { appPaused, overlayRequest, requestOverlay, settingsOpen, sidebarMode, trackingState, view } from './lib/ui';
+  import { loadLayouts, onLayoutRestored } from './lib/layouts';
+  import { onUpdateAvailable, updateProgress } from './lib/update';
+  import { errorKey } from './i18n';
   import { setVisibility, visible, watchVisibility } from './lib/visibility';
   import Toasts from './ui/toast/Toasts.svelte';
 
@@ -55,6 +59,14 @@
         setVisibility(true);
       }),
       EventsOn('onWindowVisibilityChanged', (shown: boolean) => setVisibility(shown)),
+      EventsOn('onLayoutsChanged', () => void loadLayouts()),
+      EventsOn('onUpdateAvailable', onUpdateAvailable),
+      EventsOn('onUpdateProgress', (p: number) => updateProgress.set(p)),
+      EventsOn('onUpdateFailed', (code: string) => pushMessage('error', errorKey(code, 'update.failed'))),
+      EventsOn('onLayoutRestored', onLayoutRestored),
+      EventsOn('onLayoutError', (p: { code: string; params?: Record<string, unknown> }) =>
+        pushMessage('error', errorKey(p.code), p.params),
+      ),
       watchVisibility(),
     ];
     // Reload whenever the window comes back on screen.
@@ -81,8 +93,8 @@
       <div class="shell" in:fade inert={$settingsOpen}>
         <Titlebar />
         <div class="body">
-          <AppList />
-          <Timeline />
+          <Sidebar />
+          {#if $sidebarMode === 'apps'}<Timeline />{:else}<LayoutView />{/if}
         </div>
       </div>
       {#if SettingsView}<SettingsView />{/if}

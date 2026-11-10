@@ -1,7 +1,9 @@
 <script lang="ts">
-  import { OpenOverlay, PauseTracking, ResumeTracking } from '../../../wailsjs/go/main/App';
+  import { DeleteAppHistory, OpenOverlay, PauseTracking, ResumeTracking, SetExcluded } from '../../../wailsjs/go/main/App';
   import { language, t } from '../../i18n';
-  import { apps, selectedAppID, timeline } from '../../lib/apps';
+  import { apps, loadApps, refresh, selectedAppID, timeline } from '../../lib/apps';
+  import { pushMessage, toastError } from '../../lib/toasts';
+  import ConfirmButton from '../../ui/button/ConfirmButton.svelte';
   import { appName, clock, day, dayKey } from '../../lib/format';
   import { restore, restoring } from '../../lib/restore';
   import type { SnapshotMeta } from '../../lib/types';
@@ -12,6 +14,8 @@
   import Empty from '../../ui/empty/Empty.svelte';
   import Kbd from '../../ui/kbd/Kbd.svelte';
   import Segmented from '../../ui/segmented/Segmented.svelte';
+  import { undoIndex } from '../../lib/undo';
+  import Preview from './Preview.svelte';
   import SnapshotRow from './SnapshotRow.svelte';
 
   const PAGE = 60;
@@ -48,7 +52,7 @@
     list?.scrollTo({ top: 0 });
   });
   $effect(() => {
-    if (!filtered.some((s) => s.snapshotID === selected)) selected = (filtered[1] ?? filtered[0])?.snapshotID ?? null;
+    if (!filtered.some((s) => s.snapshotID === selected)) selected = filtered[undoIndex(filtered)]?.snapshotID ?? null;
   });
 
   // Load more rows as the end of the list scrolls into view.
@@ -77,6 +81,29 @@
       doRestore();
     }
   }
+  async function toggleExcluded() {
+    if (!app) return;
+    const next = !app.excluded;
+    try {
+      await SetExcluded(app.executablePath, next);
+      pushMessage('success', next ? 'excludedToast' : 'includedToast', { app: appName(app.name) });
+      await loadApps();
+    } catch (e) {
+      toastError('settings.write', e);
+    }
+  }
+  async function deleteHistory() {
+    if (!app) return;
+    const name = appName(app.name);
+    try {
+      await DeleteAppHistory(app.appID);
+      pushMessage('success', 'historyDeleted', { app: name });
+      selectedAppID.set(null);
+      await refresh();
+    } catch (e) {
+      toastError('history.delete', e);
+    }
+  }
   function doRestore() {
     if ($selectedAppID && chosen) void restore($selectedAppID, chosen.snapshotID);
   }
@@ -91,6 +118,13 @@
         <p title={app.executablePath}>{app.executablePath}</p>
       </div>
       <div class="actions">
+        <IconButton
+          name={app.excluded ? 'eye' : 'eyeSlash'}
+          label={$t(app.excluded ? 'trackAgain' : 'stopTracking')}
+          active={app.excluded}
+          onclick={toggleExcluded}
+        />
+        <ConfirmButton icon="trash" label={$t('deleteHistory')} confirmLabel={$t('deleteHistoryConfirm')} onconfirm={deleteHistory} />
         <IconButton
           name={paused ? 'play' : 'pause'}
           label={$t(paused ? 'resumeApp' : 'pauseApp')}
@@ -113,6 +147,7 @@
       <span class="count tabular">{$t('snapshots', { n: filtered.length })}</span>
     </div>
 
+    <div class="content">
     <div class="list" bind:this={list} role="listbox" aria-label={$t('timeline')} tabindex="-1" onkeydown={keyboard}>
       {#each days as group (group.key)}
         <section>
@@ -135,6 +170,10 @@
         <Empty icon="clock" title={$t('noSnapshots')} hint={$t(filter === 'all' ? 'noSnapshotsHint' : 'noImportantHint')} />
       {/each}
       {#if limit < filtered.length}<div class="sentinel" bind:this={sentinel}></div>{/if}
+    </div>
+    {#if chosen && $selectedAppID}
+      <Preview appID={$selectedAppID} snapshot={chosen} />
+    {/if}
     </div>
 
     <footer>
@@ -203,8 +242,21 @@
     color: var(--faint);
     font-size: 12px;
   }
+  .content {
+    flex: 1;
+    min-height: 0;
+    display: flex;
+    gap: 12px;
+  }
+  /* the preview needs room; on a narrow window the list keeps it all */
+  @media (max-width: 980px) {
+    .content :global(.preview) {
+      display: none;
+    }
+  }
   .list {
     flex: 1;
+    min-width: 0;
     min-height: 0;
     padding: 0 4px 0 0;
     overflow-y: auto;

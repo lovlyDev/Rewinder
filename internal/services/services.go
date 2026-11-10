@@ -7,11 +7,13 @@ import (
 	"context"
 	"log"
 	"os"
+	"path/filepath"
 	"sync"
 
 	"Rewinder/internal/events"
 	"Rewinder/internal/hotkey"
 	"Rewinder/internal/ipcapi"
+	"Rewinder/internal/layouts"
 	"Rewinder/internal/plugins"
 	"Rewinder/internal/policy"
 	"Rewinder/internal/restore"
@@ -31,6 +33,8 @@ type Dependencies struct {
 type Services struct {
 	deps Dependencies
 	cfg  *policy.Config
+	excl *policy.Exclusions
+	lay  *layouts.Store
 
 	ev  *events.Bus
 	cap *state.CaptureEngine
@@ -73,6 +77,8 @@ func New(deps Dependencies) *Services {
 	return &Services{
 		deps:       deps,
 		cfg:        cfg,
+		excl:       policy.LoadExclusions(filepath.Dir(cfg.StorageDir)),
+		lay:        loadLayouts(cfg.StorageDir),
 		ev:         events.NewBus(4096),
 		cap:        cap,
 		ss:         ss,
@@ -110,17 +116,24 @@ func (s *Services) Start(ctx context.Context) {
 			s.showTimeline()
 			s.emit("onShowSettingsRequested", nil)
 		},
-		OnExit: func() { s.emit("onExitRequested", nil) },
+		OnExit:   func() { s.emit("onExitRequested", nil) },
+		OnLayout: func(i int) { go s.RestoreLayoutAt(i) },
 	}
 	s.hotkey = &hotkey.Listener{
 		Initial: s.deps.Hotkey,
 		OnPress: s.onHotkey,
+		Slots:   layoutShortcuts(),
+		OnSlot:  s.RestoreLayoutAt,
+		OnSlotError: func(c hotkey.Combination) {
+			log.Printf("rewinder: layout shortcut %s is used by another program", c.String())
+		},
 		OnError: func(err error) {
 			log.Printf("rewinder: %v", err)
 			s.emit("onTrackingStateChanged", ipcapi.TrackingStateChangedEvent{State: "error", Reason: err.Error(), AtUTC: ipcapi.NowUTC()})
 		},
 	}
 	s.tray.Start()
+	s.layoutsChanged()
 	s.hotkey.Start()
 	s.ev.StartWindowsSources()
 	go s.captureLoop()
@@ -157,4 +170,13 @@ func (s *Services) onHotkey() {
 func (s *Services) SetHotkey(c hotkey.Combination) error { return s.hotkey.Rebind(c) }
 func (s *Services) UpdatePreferences(c hotkey.Combination, language string) {
 	s.tray.Update(c.String(), language)
+}
+
+// layoutShortcuts are Ctrl+Alt+1…9: the first nine layouts.
+func layoutShortcuts() []hotkey.Combination {
+	out := make([]hotkey.Combination, tray.MaxLayoutItems)
+	for i := range out {
+		out[i] = hotkey.Combination{Mods: 3, Key: uint32('1' + i)}
+	}
+	return out
 }

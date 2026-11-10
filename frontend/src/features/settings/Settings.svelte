@@ -2,7 +2,7 @@
   import { t, type Key } from '../../i18n';
   import { preferences, savePreferences, type Settings } from '../../lib/preferences';
   import { toastError } from '../../lib/toasts';
-  import { settingsOpen } from '../../lib/ui';
+  import { settingsOpen, settingsSection } from '../../lib/ui';
   import { fade } from '../../lib/motion';
   import IconButton from '../../ui/button/IconButton.svelte';
   import Dialog from '../../ui/dialog/Dialog.svelte';
@@ -10,19 +10,28 @@
   import type { IconName } from '../../ui/icon/icons';
   import About from './about/About.svelte';
   import Appearance from './appearance/Appearance.svelte';
+  import Exclusions from './exclusions/Exclusions.svelte';
   import General from './general/General.svelte';
   import Language from './language/Language.svelte';
   import Shortcuts from './shortcuts/Shortcuts.svelte';
 
-  type Section = 'general' | 'hotkeys' | 'appearance' | 'language' | 'about';
+  type Section = 'general' | 'hotkeys' | 'exclusions' | 'appearance' | 'language' | 'about';
   const sections: { key: Section; icon: IconName; hint: Key }[] = [
     { key: 'general', icon: 'sliders', hint: 'generalHint' },
     { key: 'hotkeys', icon: 'keyboard', hint: 'hotkeysHint' },
+    { key: 'exclusions', icon: 'eyeSlash', hint: 'exclusionsHint' },
     { key: 'appearance', icon: 'palette', hint: 'appearanceHint' },
     { key: 'language', icon: 'globe', hint: 'languageSectionHint' },
     { key: 'about', icon: 'info', hint: 'aboutHint' },
   ];
   let section = $state<Section>('general');
+  // Jump to a section when asked (e.g. the update pill opens "About").
+  $effect(() => {
+    if ($settingsSection) {
+      section = $settingsSection as Section;
+      settingsSection.set(null);
+    }
+  });
   const index = $derived(sections.findIndex((s) => s.key === section));
 
   // A local copy the controls edit; every change is applied live and saved.
@@ -68,12 +77,14 @@
             <General />
           {:else if section === 'hotkeys'}
             <Shortcuts />
+          {:else if section === 'exclusions'}
+            <Exclusions />
           {:else if section === 'appearance' && draft}
             <Appearance {draft} {save} />
           {:else if section === 'language' && draft}
             <Language {draft} {save} />
           {:else if section === 'about'}
-            <About />
+            {#if draft}<About {draft} {save} />{/if}
           {/if}
         </div>
       {/key}

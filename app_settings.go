@@ -12,8 +12,10 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"time"
 
 	"Rewinder/internal/hotkey"
+	"Rewinder/internal/services"
 	"Rewinder/internal/settings"
 	"Rewinder/internal/winapi"
 	"github.com/wailsapp/wails/v2/pkg/runtime"
@@ -72,15 +74,24 @@ func (a *App) SetHotkey(mods, key uint32) error {
 }
 
 type AppInfo struct {
-	Version        string `json:"version"`
-	LogPath        string `json:"logPath"`
-	HistoryPath    string `json:"historyPath"`
-	SystemLanguage string `json:"systemLanguage"`
+	Version           string `json:"version"`
+	Elevated          bool   `json:"elevated"`          // running as administrator now
+	ElevationDeclined bool   `json:"elevationDeclined"` // "run as administrator" is on but UAC was declined
+	LogPath           string `json:"logPath"`
+	HistoryPath       string `json:"historyPath"`
+	SystemLanguage    string `json:"systemLanguage"`
 }
 
 func (a *App) GetAppInfo() AppInfo {
 	dir := settings.Directory()
-	return AppInfo{"0.2.0", filepath.Join(dir, "rewinder.log"), filepath.Join(dir, "history"), winapi.SystemLanguage()}
+	return AppInfo{
+		Version:           version,
+		Elevated:          winapi.SelfElevated(),
+		ElevationDeclined: a.elevationDeclined,
+		LogPath:           filepath.Join(dir, "rewinder.log"),
+		HistoryPath:       filepath.Join(dir, "history"),
+		SystemLanguage:    winapi.SystemLanguage(),
+	}
 }
 func (a *App) GetBackgroundImage() (string, error) {
 	b, err := os.ReadFile(filepath.Join(settings.Directory(), "background.png"))
@@ -129,4 +140,41 @@ func (a *App) PickBackgroundImage() (string, error) {
 		return "", errors.New("settings.write")
 	}
 	return "data:image/png;base64," + base64.StdEncoding.EncodeToString(data.Bytes()), nil
+}
+
+// SetRunAsAdmin saves the "run as administrator" choice. Switching it on while
+// not elevated restarts Rewinder through the UAC prompt; declining keeps the
+// setting off. Switching it off applies at the next start (an elevated process
+// cannot drop its rights).
+func (a *App) SetRunAsAdmin(on bool) error {
+	a.settingsMu.Lock()
+	s := a.preferences
+	s.RunAsAdmin = on
+	err := a.saveSettingsLocked(s)
+	a.settingsMu.Unlock()
+	if err != nil {
+		return err
+	}
+	if on && !winapi.SelfElevated() {
+		if err := restartElevated(); err != nil {
+			a.settingsMu.Lock()
+			s.RunAsAdmin = false
+			_ = a.saveSettingsLocked(s)
+			a.settingsMu.Unlock()
+			if errors.Is(err, winapi.ErrCancelled) {
+				return errors.New("admin.cancelled")
+			}
+			log.Printf("rewinder: restart as administrator: %v", err)
+			return errors.New("admin.failed")
+		}
+		go func() {
+			time.Sleep(300 * time.Millisecond) // let the UI get its answer first
+			a.ExitApp()
+		}()
+		return nil
+	}
+	if err := services.SyncAutostart(on && winapi.SelfElevated()); err != nil {
+		log.Printf("rewinder: autostart: %v", err)
+	}
+	return nil
 }

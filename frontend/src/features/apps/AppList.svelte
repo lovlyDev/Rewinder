@@ -29,7 +29,7 @@
   }
 </script>
 
-<aside>
+<div class="pane">
   <div class="head">
     <h2>{$t('apps')}</h2>
     <span class="count tabular">{$apps.length}</span>
@@ -60,7 +60,8 @@
             {ago(app.lastActivityUTC, $language, $now)}
           </small>
         </span>
-        {#if $appPaused[app.appID]}<span class="paused"><Icon name="pause" filled size={12} /></span>{/if}
+        {#if app.excluded}<span class="paused" title={$t('notTracked')}><Icon name="eyeSlash" filled size={12} /></span>
+        {:else if $appPaused[app.appID]}<span class="paused"><Icon name="pause" filled size={12} /></span>{/if}
       </button>
     {:else}
       {#if query}
@@ -70,19 +71,15 @@
       {/if}
     {/each}
   </div>
-</aside>
+</div>
 
 <style>
-  aside {
-    width: 280px;
-    flex: none;
+  .pane {
+    flex: 1;
     display: flex;
     flex-direction: column;
     gap: 14px;
     min-height: 0;
-    padding: 16px 10px 10px 14px;
-    border-radius: var(--r-lg);
-    background: color-mix(in srgb, var(--surface) 84%, transparent);
   }
   .head {
     display: flex;

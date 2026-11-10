@@ -3,6 +3,7 @@ package snapshot
 import (
 	"errors"
 	"path/filepath"
+	"time"
 
 	"Rewinder/internal/ipcapi"
 	"Rewinder/internal/state"
@@ -51,11 +52,35 @@ func (e *Engine) Ingest(app *state.AppState) (*ipcapi.SnapshotMeta, error) {
 		Timestamp:  app.Timestamp,
 		State:      app.Clone(),
 	}
+	if r, ok := e.restores[app.AppID]; ok {
+		delete(e.restores, app.AppID)
+		if app.Timestamp.Sub(r.at) < restoreMarkWindow {
+			snap.RestoredFrom = r.snapshotID
+		}
+	}
 	m := meta(&snap, prev) // before trimming, which may drop prev
 	tl.Snapshots = append(tl.Snapshots, snap)
 	tl.dirty = true
 	e.trimLocked(tl)
 	return &m, nil
+}
+
+// How long after a restore the next snapshot of that app counts as its result.
+const restoreMarkWindow = 20 * time.Second
+
+// MarkRestore records that snapshotID of appID is being restored, so the
+// snapshot of the resulting state can point back at it.
+func (e *Engine) MarkRestore(appID, snapshotID string) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.restores[appID] = pendingRestore{snapshotID: snapshotID, at: e.now()}
+}
+
+// ClearRestore forgets a marker set by MarkRestore (the restore failed).
+func (e *Engine) ClearRestore(appID string) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	delete(e.restores, appID)
 }
 
 // trimLocked drops snapshots past retention and over the per-app limit.

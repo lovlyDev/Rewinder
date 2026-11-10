@@ -48,6 +48,12 @@ type Listener struct {
 	Initial Combination
 	OnPress func()
 	OnError func(error)
+	// Slots are extra fixed shortcuts (Ctrl+Alt+1…9 for layouts); OnSlot gets the
+	// slot index. A slot another program already owns is skipped and logged.
+	Slots  []Combination
+	OnSlot func(int)
+	// OnSlotError reports slots that could not be registered.
+	OnSlotError func(Combination)
 
 	once     sync.Once
 	stopOnce sync.Once
@@ -102,6 +108,16 @@ func (l *Listener) run() {
 		}
 	}
 	defer procUnregisterHotKey.Call(0, hotkeyID)
+	for i, c := range l.Slots {
+		id := uintptr(hotkeyID + 1 + i)
+		if ok, _, _ := procRegisterHotKey.Call(0, id, uintptr(c.Mods)|modNoRepeat, uintptr(c.Key)); ok == 0 {
+			if l.OnSlotError != nil {
+				l.OnSlotError(c)
+			}
+			continue
+		}
+		defer procUnregisterHotKey.Call(0, id)
+	}
 
 	var m msg
 	for {
@@ -126,6 +142,9 @@ func (l *Listener) run() {
 		}
 		if m.Message == wmHotkey && m.WParam == hotkeyID && l.OnPress != nil {
 			go l.OnPress()
+		}
+		if slot := int(m.WParam) - hotkeyID - 1; m.Message == wmHotkey && slot >= 0 && slot < len(l.Slots) && l.OnSlot != nil {
+			go l.OnSlot(slot)
 		}
 	}
 }

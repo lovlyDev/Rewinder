@@ -18,18 +18,19 @@ import (
 )
 
 type App struct {
-	ctx         context.Context
-	svc         *services.Services
-	start       sync.Once
-	settingsMu  sync.Mutex
-	preferences settings.Settings
-	startHidden bool        // launched by autostart, window not shown
-	hiddenOnce  atomic.Bool // the window has been hidden or minimised at least once
+	ctx               context.Context
+	svc               *services.Services
+	start             sync.Once
+	settingsMu        sync.Mutex
+	preferences       settings.Settings
+	startHidden       bool        // launched by autostart, window not shown
+	elevationDeclined bool        // "run as administrator" is on but UAC was declined at start
+	hiddenOnce        atomic.Bool // the window has been hidden or minimised at least once
 	// overlayFromWindow: the overlay was opened from the main window, so closing it returns there
 	overlayFromWindow atomic.Bool
-	windowMu    sync.Mutex
-	overlay     bool
-	previous    struct {
+	windowMu          sync.Mutex
+	overlay           bool
+	previous          struct {
 		w, h, x, y int
 		maximized  bool
 	}
@@ -64,6 +65,7 @@ func (a *App) startup(ctx context.Context) {
 			ShowTimelineWindow: a.ShowTimelineWindow,
 		})
 		a.svc.Start(ctx)
+		go a.autoCheckUpdate()
 	})
 }
 
@@ -160,7 +162,17 @@ func (a *App) GetAutostart() bool {
 }
 
 func (a *App) SetAutostart(enabled bool) error {
-	return services.SetAutostart(enabled)
+	a.settingsMu.Lock()
+	elevated := a.preferences.RunAsAdmin && winapi.SelfElevated()
+	a.settingsMu.Unlock()
+	if err := services.SetAutostart(enabled, elevated); err != nil {
+		log.Printf("rewinder: autostart: %v", err)
+		if err.Error() == "autostart.admin" {
+			return err
+		}
+		return errors.New("saveFailed")
+	}
+	return nil
 }
 
 // Wails 2.11 SetPos takes a work-area-relative offset, while Pos is absolute.
@@ -217,6 +229,7 @@ func (a *App) preferenceLanguage() string {
 	}
 	return lang
 }
+
 // OpenOverlay turns the window into the compact quick-restore overlay for appID.
 // The hotkey calls it, and so does the "Quick restore" button in the main window.
 func (a *App) OpenOverlay(appID string) {
@@ -289,4 +302,99 @@ func (a *App) GetAppSummary(appID string) (*ipcapi.AppSummary, error) {
 		}
 	}
 	return nil, nil
+}
+
+// GetSnapshotLayout returns monitors and window rectangles for the snapshot preview.
+func (a *App) GetSnapshotLayout(appID, snapshotID string) (*ipcapi.SnapshotLayout, error) {
+	if a.svc == nil {
+		return nil, errNotReady
+	}
+	l, err := a.svc.SnapshotLayout(appID, snapshotID)
+	if err != nil {
+		code, _ := ipcapi.ErrorCode(err)
+		return nil, errors.New(code)
+	}
+	return l, nil
+}
+
+// GetExclusions lists executables that are not tracked.
+func (a *App) GetExclusions() []string {
+	if a.svc == nil {
+		return []string{}
+	}
+	return a.svc.Exclusions()
+}
+
+// SetExcluded stops or resumes tracking an executable ("chrome.exe" or a full path).
+func (a *App) SetExcluded(exe string, excluded bool) error {
+	if a.svc == nil {
+		return errNotReady
+	}
+	if err := a.svc.SetExcluded(exe, excluded); err != nil {
+		log.Printf("rewinder: exclusions: %v", err)
+		return err
+	}
+	return nil
+}
+
+// DeleteAppHistory removes all snapshots of an app.
+func (a *App) DeleteAppHistory(appID string) error {
+	if a.svc == nil {
+		return errNotReady
+	}
+	if err := a.svc.DeleteAppHistory(appID); err != nil {
+		log.Printf("rewinder: deleting history of %s: %v", appID, err)
+		return errors.New("history.delete")
+	}
+	return nil
+}
+
+func (a *App) GetLayouts() []services.LayoutSummary {
+	if a.svc == nil {
+		return []services.LayoutSummary{}
+	}
+	return a.svc.Layouts()
+}
+
+// SaveLayout saves where every open application's windows are now, under name.
+func (a *App) SaveLayout(name string) (services.LayoutSummary, error) {
+	if a.svc == nil {
+		return services.LayoutSummary{}, errNotReady
+	}
+	return a.svc.SaveLayout(name)
+}
+
+func (a *App) RenameLayout(id, name string) error {
+	if a.svc == nil {
+		return errNotReady
+	}
+	return a.svc.RenameLayout(id, name)
+}
+
+func (a *App) DeleteLayout(id string) error {
+	if a.svc == nil {
+		return errNotReady
+	}
+	return a.svc.DeleteLayout(id)
+}
+
+func (a *App) MoveLayout(id string, to int) error {
+	if a.svc == nil {
+		return errNotReady
+	}
+	return a.svc.MoveLayout(id, to)
+}
+
+func (a *App) RestoreLayout(id string) (services.LayoutResult, error) {
+	if a.svc == nil {
+		return services.LayoutResult{}, errNotReady
+	}
+	return a.svc.RestoreLayout(id)
+}
+
+func (a *App) GetLayoutPreview(id string) (*ipcapi.SnapshotLayout, error) {
+	if a.svc == nil {
+		return nil, errNotReady
+	}
+	return a.svc.LayoutPreview(id)
 }

@@ -25,8 +25,14 @@ type Engine struct {
 	cfg EngineConfig
 	now func() time.Time
 
-	mu   sync.RWMutex
-	apps map[string]*appTimeline
+	mu       sync.RWMutex
+	apps     map[string]*appTimeline
+	restores map[string]pendingRestore // appID -> restore whose result is not captured yet
+}
+
+type pendingRestore struct {
+	snapshotID string
+	at         time.Time
 }
 
 type appTimeline struct {
@@ -44,6 +50,9 @@ type Snapshot struct {
 	AppID      string         `json:"appID"`
 	Timestamp  time.Time      `json:"timestamp"`
 	State      state.AppState `json:"state"`
+	// RestoredFrom is set when this state is the result of restoring another
+	// snapshot, so the next "undo" can go further back instead of undoing the undo.
+	RestoredFrom string `json:"restoredFrom,omitempty"`
 }
 
 // FullSnapshot is the resolved state handed to the restore engine.
@@ -58,7 +67,7 @@ func NewEngine(cfg EngineConfig) *Engine {
 	if cfg.Retention <= 0 {
 		cfg.Retention = 7 * 24 * time.Hour
 	}
-	return &Engine{cfg: cfg, now: time.Now, apps: map[string]*appTimeline{}}
+	return &Engine{cfg: cfg, now: time.Now, apps: map[string]*appTimeline{}, restores: map[string]pendingRestore{}}
 }
 
 // GetApps lists tracked apps, most recently active first.
@@ -71,9 +80,9 @@ func (e *Engine) GetApps() []ipcapi.AppSummary {
 			continue
 		}
 		out = append(out, ipcapi.AppSummary{
-			AppID:           tl.AppID,
-			Name:            tl.Name,
-			ExecutablePath:  tl.Exe,
+			AppID:          tl.AppID,
+			Name:           tl.Name,
+			ExecutablePath: tl.Exe,
 			// The last change, not the last time the app was seen: every start of
 			// Rewinder sees all open apps again, which is not news to the user.
 			LastActivityUTC: tl.Snapshots[len(tl.Snapshots)-1].Timestamp.UTC().UnixMilli(),
@@ -129,6 +138,7 @@ func meta(s *Snapshot, prev *state.AppState) ipcapi.SnapshotMeta {
 		AppID:        s.AppID,
 		Timestamp:    s.Timestamp.UTC().UnixMilli(),
 		WindowsCount: len(s.State.Windows),
+		RestoredFrom: s.RestoredFrom,
 	}
 	if prev != nil {
 		m.FilesAdded, m.FilesRemoved = diffFileCounts(prev.OpenFiles, s.State.OpenFiles)

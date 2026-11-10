@@ -4,6 +4,7 @@ package restore
 
 import (
 	"fmt"
+	"log"
 	"path/filepath"
 	"sort"
 
@@ -28,10 +29,17 @@ func (e *Engine) apply(saved *state.AppState, live *state.AppState) (int, error)
 	for si, li := range m {
 		pairs = append(pairs, placedWindow{saved: saved.Windows[si], hwnd: live.Windows[li].HWND})
 	}
+	works := workAreas()
 	moved := 0
 	var firstErr error
 	for _, p := range pairs {
-		if err := winapi.SetPlacement(p.hwnd, p.saved.Placement()); err == nil {
+		pl := p.saved.Placement()
+		if fitted, changed := FitToMonitors(fromWinRect(pl.NormalRect), works); changed {
+			// Its monitor is gone (or the layout changed): bring it onto the primary one.
+			log.Printf("rewinder: window %x was off-screen at %+v, moved to %+v", p.hwnd, pl.NormalRect, fitted)
+			pl.NormalRect = toWinRect(fitted)
+		}
+		if err := winapi.SetPlacement(p.hwnd, pl); err == nil {
 			moved++
 		} else if firstErr == nil {
 			firstErr = err
@@ -42,6 +50,23 @@ func (e *Engine) apply(saved *state.AppState, live *state.AppState) (int, error)
 	}
 	raiseAndFocus(pairs)
 	return moved, nil
+}
+
+func workAreas() []state.Rect {
+	ws := winapi.WorkspaceWorkAreas()
+	out := make([]state.Rect, len(ws))
+	for i, w := range ws {
+		out[i] = fromWinRect(w)
+	}
+	return out
+}
+
+func fromWinRect(r winapi.Rect) state.Rect {
+	return state.Rect{Left: r.Left, Top: r.Top, Right: r.Right, Bottom: r.Bottom}
+}
+
+func toWinRect(r state.Rect) winapi.Rect {
+	return winapi.Rect{Left: r.Left, Top: r.Top, Right: r.Right, Bottom: r.Bottom}
 }
 
 // refusedError explains why Windows would not move the windows. The usual reason
