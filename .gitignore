@@ -15,13 +15,12 @@
 go.work
 
 # Wails build outputs
-build/
+build/bin/
 app.syso
 
 # Frontend dependencies
 frontend/node_modules/
 frontend/dist/
-frontend/package-lock.json
 
 # IDE files
 .vscode/
@@ -72,3 +71,4 @@ node_modules/
 # Wails specific
 wails.json.md5
 frontend/wailsjs/
+frontend/package.json.md5

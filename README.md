@@ -1,4 +1,4 @@
-# <img src="internal/public/icon.ico" width="32"> Rewinder — Time Machine for Windows windows
+# <img src="build/appicon.png" width="32"> Rewinder — Time Machine for Windows windows
 
 **Remembers where and how your windows were, and puts them back with one key.**
 
@@ -64,6 +64,27 @@ Integration tests open real windows on the desktop, move, close and restore them
 
 ```bash
 go test -tags integration ./...
+```
+
+## Project layout
+
+```
+main.go, app.go        Wails entry point and the methods the UI calls
+internal/
+  winapi/              thin Win32 wrappers: windows, placement, processes, launch, open files
+  state/               captures an app's windows into an AppState
+  snapshot/            per-app timeline: ingest, change detection, persistence
+  restore/             relaunch / reopen, match windows, put them back
+  plugins/             app-specific capture and relaunch (browsers, Explorer, Office)
+  events/              WinEvent hook: window moved / shown / focused
+  hotkey/, tray/       Ctrl+Alt+Z and the tray icon
+  policy/              what is tracked and for how long
+  services/            wires everything together: capture loop, restore, tracking
+frontend/src/
+  App.svelte           picks the view and subscribes to backend events
+  views/               Overlay, Timeline, Settings
+  components/          TopBar, AppList, SnapshotList, Toasts
+  lib/                 stores and actions (apps, restore, toasts, formatting)
 ```
 
 ## Troubleshooting

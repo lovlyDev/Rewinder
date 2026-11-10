@@ -6,9 +6,11 @@ import (
 	"log"
 	"os"
 	"sync"
+	"time"
 
 	"Rewinder/internal/ipcapi"
 	"Rewinder/internal/services"
+	"Rewinder/internal/winapi"
 
 	"github.com/wailsapp/wails/v2/pkg/runtime"
 )
@@ -44,6 +46,15 @@ func (a *App) startup(ctx context.Context) {
 				runtime.EventsEmit(ctx, "onOverlayOpenRequested", OverlayRequest{AppID: appID})
 				runtime.WindowSetAlwaysOnTop(ctx, true)
 				runtime.WindowFullscreen(ctx)
+				runtime.WindowShow(ctx)
+				// Windows often refuses Wails' own SetForegroundWindow (focus-stealing
+				// guard); then the overlay is visible but keys still go to the other app.
+				if !winapi.WaitAndForceForeground(uint32(os.Getpid()), time.Second) {
+					log.Printf("rewinder: could not bring the overlay to the foreground")
+					return
+				}
+				// Now that the window is active, show again: Wails' SetFocus is what hands
+				// keyboard focus to the WebView, and it only works for the active window.
 				runtime.WindowShow(ctx)
 			},
 			ShowTimelineWindow: a.ShowTimelineWindow,

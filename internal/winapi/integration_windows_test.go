@@ -9,6 +9,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"golang.org/x/sys/windows"
 )
 
 // The old handle-table struct had the wrong layout, so no file was ever found.
@@ -54,6 +56,16 @@ func TestProcessInfoOfSelf(t *testing.T) {
 	}
 	if AppUserModelID(pid) != "" {
 		t.Fatal("a test binary is not a packaged app")
+	}
+}
+
+func TestIsElevatedMatchesOwnToken(t *testing.T) {
+	want := windows.GetCurrentProcessToken().IsElevated()
+	if got := IsElevated(uint32(os.Getpid())); got != want {
+		t.Fatalf("IsElevated(self) = %v, token says %v", got, want)
+	}
+	if IsElevated(0) {
+		t.Fatal("PID 0 cannot be opened and must not count as elevated")
 	}
 }
 
